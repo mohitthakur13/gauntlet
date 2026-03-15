@@ -1,11 +1,12 @@
 import readline, { type Interface as ReadlineInterface } from 'node:readline';
 import process from 'node:process';
-import { getModelDisplayName, resolveModelAddress } from './config.js';
-import { loadContext } from './context.js';
+import { buildInitialReplState, getModelDisplayName, getProposerAndCriticIds, MODEL_CONFIGS, resolveModelAddress } from './config.js';
+import { loadContext, previewContext } from './context.js';
 import { parseCommand, resolveLoadedInput, saveHistory } from './commands.js';
 import { ConversationHistory } from './history.js';
+import { buildSequentialCriticPrompt, buildSystemPrompt, FREEFORM_PROMPT, PARALLEL_CRITIC_PROMPT, PROPOSER_PROMPT, SYNTHESISER_PROMPT } from './prompts.js';
 import { Renderer } from './renderer.js';
-import type { ContextResolver, ModelClient, ModelName, ModelRole, ReplState } from './types.js';
+import type { ContextResolver, ContextState, CritiqueMode, HistoryEntry, ModelClient, ModelId, ModelRole, ReplState, Round } from './types.js';
 
 type PromptPhase = 'prompt' | 'confirming';
 
@@ -35,22 +36,23 @@ function question(
   });
 }
 
+function buildSyntheticUserHistory(history: HistoryEntry[], content: string): HistoryEntry[] {
+  return [...history, { role: 'user', content }];
+}
+
+function previewContextForReload(context: ContextState): string {
+  return previewContext(context);
+}
+
 export async function startRepl(params: {
   cwd: string;
   resolver: ContextResolver;
-  codex: ModelClient;
-  opus: ModelClient;
+  clients: Map<ModelId, ModelClient>;
 }): Promise<void> {
   const renderer = new Renderer();
   const history = new ConversationHistory();
   let context = await loadContext(params.resolver);
-  let replState: ReplState = {
-    mode: 'both',
-    order: 'codex-first',
-    hasHistory: false,
-    isStreaming: false,
-    streamingTarget: null,
-  };
+  let replState: ReplState = buildInitialReplState();
   let phase: PromptPhase = 'prompt';
   let abortController: AbortController | null = null;
   let pendingPromptFinish: (() => void) | null = null;
@@ -74,7 +76,7 @@ export async function startRepl(params: {
   };
 
   const saveIfRequested = async (): Promise<boolean> => {
-    if (!replState.hasHistory || !history.hasUnsavedChanges()) {
+    if (history.count() === 0 || !history.hasUnsavedChanges()) {
       return true;
     }
 
@@ -84,7 +86,10 @@ export async function startRepl(params: {
     }
 
     try {
-      const savedPath = await saveHistory(history, params.cwd, answer.toLowerCase() === 'y' ? undefined : answer);
+      const savedPath = await saveHistory(history, params.cwd, answer.toLowerCase() === 'y' ? undefined : answer, {
+        replState,
+        context,
+      });
       renderer.info(`Saved session to ${savedPath}`);
       return true;
     } catch (error) {
@@ -97,6 +102,7 @@ export async function startRepl(params: {
     if (exiting) {
       return;
     }
+
     exiting = true;
     exitRequested = false;
     const okayToExit = await saveIfRequested();
@@ -104,6 +110,7 @@ export async function startRepl(params: {
       exiting = false;
       return;
     }
+
     rl.close();
   };
 
@@ -113,6 +120,7 @@ export async function startRepl(params: {
       replState = { ...replState, isStreaming: false, streamingTarget: null };
       return;
     }
+
     if (phase === 'confirming') {
       return;
     }
@@ -132,13 +140,14 @@ export async function startRepl(params: {
 
   process.on('SIGINT', onSigint);
 
-  renderer.banner(context.path, params.codex.model, params.opus.model, replState);
+  renderer.banner(context.path, [...params.clients.values()], replState);
 
   while (!closed) {
     phase = 'prompt';
-    const rawInput = await question(rl, renderer.renderPrompt(replState), (finish) => {
+    const rawInput = await question(rl, renderer.renderPrompt(replState, params.clients), (finish) => {
       pendingPromptFinish = finish;
     });
+
     if (rawInput === null) {
       if (exitRequested) {
         await handleExit();
@@ -154,7 +163,9 @@ export async function startRepl(params: {
     const directAddress = parseDirectAddress(input);
     if (directAddress) {
       if (directAddress.type === 'unknown') {
-        renderer.error(`Unknown model "${directAddress.token}". Use @codex or @<display-name>.`);
+        renderer.error(
+          `Unknown model "${directAddress.token}". Available: ${MODEL_CONFIGS.map((entry) => `@${entry.id}`).join(', ')}`,
+        );
         continue;
       }
 
@@ -163,7 +174,7 @@ export async function startRepl(params: {
         continue;
       }
 
-      await runTurn(directAddress.message, directAddress.model);
+      await runDirectTurn(directAddress.message, directAddress.modelId);
       continue;
     }
 
@@ -172,22 +183,40 @@ export async function startRepl(params: {
       repl: replState,
       context,
       historyLength: history.count(),
-      codexModel: params.codex.model,
-      opusModel: params.opus.model,
+      models: MODEL_CONFIGS,
+      defaults: getProposerAndCriticIds(),
     });
 
     if (command.type !== 'noop') {
       if (command.type === 'mode') {
-        replState = { ...replState, mode: command.mode };
+        replState = command.mode === 'multi'
+          ? { ...replState, mode: 'multi', singleModelId: null }
+          : { ...replState, mode: 'single', singleModelId: command.modelId };
         renderer.info(command.message);
         continue;
       }
 
-      if (command.type === 'order') {
-        if (command.order) {
-          replState = { ...replState, order: command.order };
+      if (command.type === 'propose') {
+        replState = { ...replState, proposerId: command.modelId };
+        renderer.info(command.message);
+        continue;
+      }
+
+      if (command.type === 'critics') {
+        if (command.criticIds) {
+          replState = { ...replState, criticIds: command.criticIds };
         }
         renderer.info(command.message);
+        continue;
+      }
+
+      if (command.type === 'critique') {
+        await runCritique(command.mode, command.criticIds);
+        continue;
+      }
+
+      if (command.type === 'review') {
+        await runReview(command.modelId);
         continue;
       }
 
@@ -198,7 +227,7 @@ export async function startRepl(params: {
 
       if (command.type === 'context-reload') {
         context = await loadContext(params.resolver);
-        renderer.info(context.path ? `Context reloaded: ${context.path}` : 'No context loaded.');
+        renderer.info(previewContextForReload(context));
         continue;
       }
 
@@ -206,7 +235,6 @@ export async function startRepl(params: {
         const answer = await confirm('Clear history? [y/n] ');
         if (answer.toLowerCase() === 'y') {
           history.clear();
-          replState = { ...replState, hasHistory: false };
           renderer.info('History cleared.');
         }
         continue;
@@ -214,7 +242,10 @@ export async function startRepl(params: {
 
       if (command.type === 'save') {
         try {
-          const savedPath = await saveHistory(history, params.cwd, command.path);
+          const savedPath = await saveHistory(history, params.cwd, command.path, {
+            replState,
+            context,
+          });
           renderer.info(`Saved session to ${savedPath}`);
         } catch (error) {
           renderer.error(`Failed to save session: ${error instanceof Error ? error.message : String(error)}`);
@@ -230,7 +261,7 @@ export async function startRepl(params: {
       if (command.type === 'input') {
         try {
           const loaded = await resolveLoadedInput(params.cwd, command.display);
-          await runTurn(loaded);
+          await runQueryTurn(loaded);
         } catch (error) {
           renderer.error(`Failed to load file: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -238,81 +269,200 @@ export async function startRepl(params: {
       }
     }
 
-    await runTurn(rawInput);
+    await runQueryTurn(rawInput);
   }
 
   process.removeListener('SIGINT', onSigint);
   process.stdout.write('\n');
 
-  async function runTurn(message: string, directTarget?: ModelName): Promise<void> {
+  async function runQueryTurn(message: string): Promise<void> {
     history.addUserMessage(message);
-    replState = { ...replState, hasHistory: true };
 
-    if (directTarget) {
-      const role = getRoleForModel(directTarget);
-      const client = directTarget === 'codex' ? params.codex : params.opus;
-      const text = await streamModel(directTarget, client, role);
-      if (text !== null) {
-        history.addAssistantMessage(directTarget, text);
-      }
-      renderer.separator();
-      return;
-    }
-
-    if (replState.mode === 'codex') {
-      const codexText = await streamModel('codex', params.codex, 'freeform');
-      if (codexText !== null) {
-        history.addAssistantMessage('codex', codexText);
-      }
-      renderer.separator();
-      return;
-    }
-
-    if (replState.mode === 'opus') {
-      const opusText = await streamModel('opus', params.opus, 'freeform');
-      if (opusText !== null) {
-        history.addAssistantMessage('opus', opusText);
-      }
-      renderer.separator();
-      return;
-    }
-
-    const sequence: Array<{ label: ModelName; client: ModelClient; role: ModelRole }> =
-      replState.order === 'codex-first'
-        ? [
-            { label: 'codex', client: params.codex, role: 'proposer' },
-            { label: 'opus', client: params.opus, role: 'critic' },
-          ]
-        : [
-            { label: 'opus', client: params.opus, role: 'proposer' },
-            { label: 'codex', client: params.codex, role: 'critic' },
-          ];
-
-    for (const step of sequence) {
-      const text = await streamModel(step.label, step.client, step.role);
-      if (text === null) {
+    if (replState.mode === 'single' && replState.singleModelId) {
+      const client = params.clients.get(replState.singleModelId);
+      if (!client) {
+        renderer.error(`Unknown model "${replState.singleModelId}".`);
         renderer.separator();
         return;
       }
-      history.addAssistantMessage(step.label, text);
+
+      const text = await streamModel({
+        client,
+        role: 'freeform',
+        streamHistory: history.getEntries(),
+        header: renderer.renderModelHeader(client.displayName),
+        streamingTarget: client.displayName,
+        systemPrompt: buildSystemPrompt(context.content, FREEFORM_PROMPT),
+      });
+      if (text !== null) {
+        history.addAssistantMessage(replState.singleModelId, text, 'freeform');
+      }
+      renderer.separator();
+      return;
     }
 
+    const proposerClient = params.clients.get(replState.proposerId);
+    if (!proposerClient) {
+      renderer.error(`Unknown model "${replState.proposerId}".`);
+      renderer.separator();
+      return;
+    }
+
+    const proposalText = await streamModel({
+      client: proposerClient,
+      role: 'proposer',
+      streamHistory: history.getEntries(),
+      header: renderer.renderModelHeader(proposerClient.displayName),
+      streamingTarget: proposerClient.displayName,
+      systemPrompt: buildSystemPrompt(context.content, PROPOSER_PROMPT),
+    });
+    if (proposalText === null) {
+      renderer.separator();
+      return;
+    }
+
+    const proposerEntry = history.addAssistantMessage(replState.proposerId, proposalText, 'proposer');
+    history.startRound(message, proposerEntry);
     renderer.separator();
   }
 
-  async function streamModel(label: 'codex' | 'opus', client: ModelClient, role: ModelRole): Promise<string | null> {
+  async function runDirectTurn(message: string, modelId: ModelId): Promise<void> {
+    history.addUserMessage(message);
+
+    const client = params.clients.get(modelId);
+    if (!client) {
+      renderer.error(`Unknown model "${modelId}".`);
+      renderer.separator();
+      return;
+    }
+
+    const role = getRoleForModel(modelId);
+    const text = await streamModel({
+      client,
+      role,
+      streamHistory: history.getEntries(),
+      header: renderer.renderModelHeader(client.displayName),
+      streamingTarget: client.displayName,
+    });
+    if (text !== null) {
+      history.addAssistantMessage(modelId, text, role);
+    }
+    renderer.separator();
+  }
+
+  async function runCritique(mode: CritiqueMode, criticIds: ModelId[]): Promise<void> {
+    const round = history.getLastRound();
+    if (!round) {
+      renderer.info('No response to critique yet. Send a query first.');
+      return;
+    }
+
+    if (round.critiqueMode !== null) {
+      renderer.info('This round has already been critiqued.\nSend a new query to start another round.');
+      return;
+    }
+
+    for (let index = 0; index < criticIds.length; index += 1) {
+      const criticId = criticIds[index];
+      const criticClient = params.clients.get(criticId);
+      if (!criticClient) {
+        renderer.error(`Unknown model "${criticId}".`);
+        return;
+      }
+
+      const systemPrompt = mode === 'parallel'
+        ? buildSystemPrompt(context.content, PARALLEL_CRITIC_PROMPT)
+        : buildSystemPrompt(context.content, buildSequentialCriticPrompt(index + 1, criticIds.length));
+      const criticContext = mode === 'parallel'
+        ? history.buildParallelCriticContext(round, round.question)
+        : history.buildSequentialCriticContext(round, round.question, index, criticIds.length);
+      const criticHistory = buildSyntheticUserHistory(history.getEntries(), criticContext);
+      const critiqueText = await streamModel({
+        client: criticClient,
+        role: 'critic',
+        streamHistory: criticHistory,
+        header: renderer.renderCriticHeader(criticClient.displayName, mode, index + 1, criticIds.length),
+        streamingTarget: criticClient.displayName,
+        systemPrompt,
+      });
+
+      if (critiqueText === null) {
+        return;
+      }
+
+      const critiqueEntry = history.addAssistantMessage(criticId, critiqueText, 'critic');
+      history.addCritiqueToCurrentRound(critiqueEntry, criticId);
+    }
+
+    history.closeRound(mode);
+    renderer.separator();
+  }
+
+  async function runReview(modelId?: ModelId): Promise<void> {
+    const round = history.getLastRound();
+    if (!round) {
+      renderer.info('No response to review. Send a query first.');
+      return;
+    }
+
+    if (round.critiqueMode === null) {
+      renderer.info('No critiques to review. Run /critique first.');
+      return;
+    }
+
+    if (round.reviewEntry !== null) {
+      renderer.info('This round has already been reviewed.\nSend a new query to start another round.');
+      return;
+    }
+
+    const synthesiserId = modelId ?? replState.proposerId;
+    const synthesiserClient = params.clients.get(synthesiserId);
+    if (!synthesiserClient) {
+      renderer.error(`Unknown model "${synthesiserId}".`);
+      return;
+    }
+
+    const reviewContext = history.buildSynthesiserContext(round, round.question);
+    const reviewHistory = buildSyntheticUserHistory(history.getEntries(), reviewContext);
+    const reviewText = await streamModel({
+      client: synthesiserClient,
+      role: 'synthesiser',
+      streamHistory: reviewHistory,
+      header: renderer.renderSynthesiserHeader(synthesiserClient.displayName),
+      streamingTarget: `${synthesiserClient.displayName} (synthesising)`,
+      systemPrompt: buildSystemPrompt(context.content, SYNTHESISER_PROMPT),
+    });
+
+    if (reviewText === null) {
+      return;
+    }
+
+    const reviewEntry = history.addAssistantMessage(synthesiserId, reviewText, 'synthesiser');
+    history.setReviewOnLastRound(reviewEntry);
+    renderer.separator();
+  }
+
+  async function streamModel(paramsForStream: {
+    client: ModelClient;
+    role: ModelRole;
+    streamHistory: HistoryEntry[];
+    header: string;
+    streamingTarget: string;
+    systemPrompt?: string;
+  }): Promise<string | null> {
     renderer.print('');
-    replState = { ...replState, isStreaming: true, streamingTarget: label };
-    renderer.print(renderer.renderPrompt(replState));
-    renderer.print(renderer.modelHeader(label));
+    replState = { ...replState, isStreaming: true, streamingTarget: paramsForStream.streamingTarget };
+    renderer.print(renderer.renderPrompt(replState, params.clients));
+    renderer.print(paramsForStream.header);
 
     abortController = new AbortController();
 
     try {
-      const result = await client.streamResponse({
-        history: history.getEntries(),
+      const result = await paramsForStream.client.streamResponse({
+        history: paramsForStream.streamHistory,
         context: context.content,
-        role,
+        role: paramsForStream.role,
+        systemPrompt: paramsForStream.systemPrompt,
         signal: abortController.signal,
         write: (chunk) => renderer.write(chunk),
       });
@@ -325,15 +475,16 @@ export async function startRepl(params: {
 
       return result.text.trimEnd();
     } catch (error) {
-      const modelLabel = getModelDisplayName(label);
-      if (error instanceof Error && error.message.startsWith(`${modelLabel} error:`)) {
+      if (error instanceof Error && error.message.startsWith(`${paramsForStream.client.displayName} error:`)) {
         if (error.message.includes('429')) {
           renderer.error(`${error.message} — retrying in 5s failed`);
         } else {
           renderer.error(error.message);
         }
       } else {
-        renderer.error(`${modelLabel} error: ${error instanceof Error ? error.message : String(error)}`);
+        renderer.error(
+          `${paramsForStream.client.displayName} error: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
       return null;
     } finally {
@@ -342,36 +493,40 @@ export async function startRepl(params: {
     }
   }
 
-  function getRoleForModel(model: ModelName): ModelRole {
-    if (replState.mode !== 'both') {
+  function getRoleForModel(modelId: ModelId): ModelRole {
+    if (replState.mode !== 'multi') {
       return 'freeform';
     }
 
-    if (replState.order === 'codex-first') {
-      return model === 'codex' ? 'proposer' : 'critic';
+    if (modelId === replState.proposerId) {
+      return 'proposer';
     }
 
-    return model === 'opus' ? 'proposer' : 'critic';
+    if (replState.criticIds.includes(modelId)) {
+      return 'critic';
+    }
+
+    return 'freeform';
   }
 }
 
 function parseDirectAddress(
   input: string,
-): { type: 'target'; model: ModelName; message: string; token: string } | { type: 'unknown'; token: string } | null {
+): { type: 'target'; modelId: ModelId; message: string; token: string } | { type: 'unknown'; token: string } | null {
   const match = input.match(/^@([^\s]+)\s*(.*)$/i);
   if (!match) {
     return null;
   }
 
   const [, rawToken, rest] = match;
-  const model = resolveModelAddress(rawToken);
-  if (!model) {
+  const modelId = resolveModelAddress(rawToken);
+  if (!modelId) {
     return { type: 'unknown', token: rawToken };
   }
 
   return {
     type: 'target',
-    model,
+    modelId,
     message: rest.trim(),
     token: rawToken,
   };

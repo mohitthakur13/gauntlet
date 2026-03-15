@@ -1,11 +1,36 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { getModelConfig, getModelDisplayName } from './config.js';
 import { previewContext } from './context.js';
 import { ConversationHistory } from './history.js';
-import type { ActiveOrder, CommandContext, CommandResult } from './types.js';
+import type { CommandContext, CommandResult, ContextState, CritiqueMode, ModelDefinition, ModelId, ReplState, Round } from './types.js';
 
-function formatOrder(order: ActiveOrder): string {
-  return order === 'codex-first' ? 'Order: codex → opus' : 'Order: opus → codex';
+function findModelId(token: string, models: ModelDefinition[]): ModelId | null {
+  const normalized = token.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  const entry = models.find((model) => (
+    model.id.toLowerCase() === normalized || model.displayName.toLowerCase() === normalized
+  ));
+  return entry?.id ?? null;
+}
+
+function parseModelIds(tokens: string[], models: ModelDefinition[]): ModelId[] | null {
+  const ids: ModelId[] = [];
+  for (const token of tokens) {
+    const id = findModelId(token, models);
+    if (!id) {
+      return null;
+    }
+    ids.push(id);
+  }
+  return ids;
+}
+
+function formatCritics(criticIds: ModelId[]): string {
+  return `Critics: ${criticIds.map((id) => getModelDisplayName(id)).join(', ')}`;
 }
 
 export function parseCommand(input: string, context: CommandContext): CommandResult {
@@ -15,77 +40,188 @@ export function parseCommand(input: string, context: CommandContext): CommandRes
   }
 
   const [command, ...rest] = trimmed.split(/\s+/);
-  const arg = rest.join(' ');
+  const targetModel = context.models.find((entry) => command === `/${entry.id}`);
+
+  if (targetModel) {
+    return {
+      type: 'mode',
+      mode: 'single',
+      modelId: targetModel.id,
+      message: `Mode set to ${targetModel.displayName}.`,
+    };
+  }
 
   switch (command) {
-    case '/codex':
-      return { type: 'mode', mode: 'codex', message: 'Mode set to codex.' };
-    case '/opus':
-      return { type: 'mode', mode: 'opus', message: 'Mode set to opus.' };
     case '/both':
-      return { type: 'mode', mode: 'both', message: 'Mode set to both.' };
-    case '/order':
-      if (context.repl.mode !== 'both') {
+      return { type: 'mode', mode: 'multi', message: 'Mode set to multi.' };
+    case '/single': {
+      const token = rest[0];
+      if (!token) {
+        return { type: 'info', message: 'Usage: /single <id>' };
+      }
+
+      const modelId = findModelId(token, context.models);
+      if (!modelId) {
+        return { type: 'info', message: `Unknown model "${token}".` };
+      }
+
+      return {
+        type: 'mode',
+        mode: 'single',
+        modelId,
+        message: `Mode set to ${getModelDisplayName(modelId)}.`,
+      };
+    }
+    case '/propose': {
+      const token = rest[0];
+      if (!token) {
+        return { type: 'info', message: 'Usage: /propose <id>' };
+      }
+
+      const modelId = findModelId(token, context.models);
+      if (!modelId) {
+        return { type: 'info', message: `Unknown model "${token}".` };
+      }
+
+      return {
+        type: 'propose',
+        modelId,
+        message: `Proposer: ${getModelDisplayName(modelId)}`,
+      };
+    }
+    case '/critics':
+      if (rest.length === 0) {
+        return { type: 'critics', message: formatCritics(context.repl.criticIds) };
+      }
+
+      if (rest.length < 1) {
+        return { type: 'info', message: 'Usage: /critics <id> [id...]' };
+      }
+
+      {
+        const criticIds = parseModelIds(rest, context.models);
+        if (!criticIds) {
+          const unknown = rest.find((token) => !findModelId(token, context.models)) ?? rest[0];
+          return { type: 'info', message: `Unknown model "${unknown}".` };
+        }
+
         return {
-          type: 'info',
-          message: 'Order only applies in /both mode. Switch with /both first.',
+          type: 'critics',
+          criticIds,
+          message: formatCritics(criticIds),
+        };
+      }
+    case '/critique': {
+      let mode: CritiqueMode = 'parallel';
+      let criticTokens = rest;
+
+      if (rest[0] === 'parallel') {
+        mode = 'parallel';
+        criticTokens = rest.slice(1);
+      } else if (rest[0] === 'sequential') {
+        mode = 'sequential';
+        criticTokens = rest.slice(1);
+      }
+
+      if (mode === 'parallel' && criticTokens.length > 0) {
+        return { type: 'info', message: 'Usage: /critique [parallel|sequential] [id...]' };
+      }
+
+      if (criticTokens.length === 0) {
+        return {
+          type: 'critique',
+          mode,
+          criticIds: [...context.repl.criticIds],
         };
       }
 
-      if (!arg) {
-        return { type: 'order', message: formatOrder(context.repl.order) };
+      const criticIds = parseModelIds(criticTokens, context.models);
+      if (!criticIds) {
+        const unknown = criticTokens.find((token) => !findModelId(token, context.models)) ?? criticTokens[0];
+        return { type: 'info', message: `Unknown model "${unknown}".` };
       }
 
-      if (arg !== 'codex-first' && arg !== 'opus-first') {
-        return { type: 'info', message: 'Usage: /order codex-first|opus-first' };
+      return { type: 'critique', mode, criticIds };
+    }
+    case '/review': {
+      if (rest.length === 0) {
+        return { type: 'review' };
       }
 
-      return { type: 'order', order: arg, message: formatOrder(arg) };
+      const modelId = findModelId(rest[0], context.models);
+      if (!modelId) {
+        return { type: 'info', message: `Unknown model "${rest[0]}".` };
+      }
+
+      return { type: 'review', modelId };
+    }
     case '/load':
-      if (!arg) {
+      if (rest.length === 0) {
         return { type: 'info', message: 'Usage: /load <path>' };
       }
-      return { type: 'input', content: `@load ${arg}`, display: arg };
+      return { type: 'input', content: `@load ${rest.join(' ')}`, display: rest.join(' ') };
     case '/context':
-      if (arg === 'reload') {
+      if (rest[0] === 'reload') {
         return { type: 'context-reload' };
       }
       return { type: 'info', message: previewContext(context.context) };
     case '/clear':
       return { type: 'clear' };
     case '/save':
-      return { type: 'save', path: arg || undefined };
+      return { type: 'save', path: rest.join(' ') || undefined };
     case '/models':
       return {
         type: 'info',
-        message: `Codex: ${context.codexModel}\nOpus: ${context.opusModel}`,
+        message: context.models.map((entry) => (
+          `${entry.id}: ${entry.displayName} · ${entry.model} · ${entry.provider}`
+        )).join('\n'),
       };
     case '/help':
+      {
+        const shortcutLines = context.models.map((entry) => {
+          const commandLabel = `  /${entry.id}`;
+          return `${commandLabel.padEnd(33, ' ')}Shortcut: /single ${entry.id}`;
+        });
+
       return {
         type: 'info',
         message: [
-          'Routing',
-          '  /codex              Only Codex responds',
-          '  /opus               Only Opus responds',
-          '  /both               Both models respond (default)',
-          '  /order codex-first  Codex responds first, Opus critiques',
-          '  /order opus-first   Opus responds first, Codex critiques',
+          'Proposer & critics',
+          '  /propose <id>                    Set who proposes',
+          '  /critics [id...]                 Show or set critic list',
+          '',
+          'Critique',
+          '  /critique                        Parallel (default order)',
+          '  /critique parallel               Explicit parallel',
+          '  /critique sequential             Sequential (default order)',
+          '  /critique sequential <id> [id…]  Sequential (custom order)',
+          '  /review [id]                     Synthesise all critiques',
+          '',
+          'Modes',
+          '  /both                            Multi mode',
+          '  /single <id>                     Single model freeform',
+          ...shortcutLines,
+          '',
+          'Direct address',
+          '  @<model> <message>               One-turn message, mode unchanged',
           '',
           'Input',
-          '  /load <path>        Load a file as the next user message',
-          '  /context            Show loaded context file',
-          '  /context reload     Reload context.md from disk',
+          '  /load <path>                     Load file as next message',
+          '  /context                         Show context metadata',
+          '  /context reload                  Reload context.md from disk',
           '',
           'Session',
-          '  /save [path]        Save session to markdown',
-          '  /clear              Clear conversation history',
-          '  /models             Show current model names',
+          '  /save [path]                     Save session to markdown',
+          '  /clear                           Clear history and rounds',
+          '  /models                          Show available models',
+          '  /help                            Show this help',
           '',
-          'Utility',
-          '  /help               Show this help',
-          '  /exit or /q         Exit gauntlet',
+          'Keys',
+          '  ctrl+c at prompt                 Exit (save prompt if history)',
+          '  ctrl+c mid-stream                Cancel current response',
         ].join('\n'),
       };
+      }
     case '/exit':
     case '/q':
       return { type: 'exit' };
@@ -99,16 +235,94 @@ export async function resolveLoadedInput(cwd: string, relativePath: string): Pro
   return readFile(absolutePath, 'utf8');
 }
 
-export async function saveHistory(history: ConversationHistory, cwd: string, targetPath?: string): Promise<string> {
+function renderRound(round: Round): string {
+  const proposalName = round.proposerEntry.modelId ? getModelDisplayName(round.proposerEntry.modelId) : 'assistant';
+  const parts: string[] = [
+    `## Round ${round.number}`,
+    '',
+    `**Query:** ${round.question}`,
+  ];
+
+  if (round.critiqueMode) {
+    parts.push(`**Critique mode:** ${round.critiqueMode}`);
+    parts.push(`**Critic order:** ${round.criticOrder.map((criticId) => getModelDisplayName(criticId)).join(', ')}`);
+  }
+
+  parts.push('');
+  parts.push(`### Proposal — ${proposalName}`);
+  parts.push('');
+  parts.push(round.proposerEntry.content);
+
+  if (round.critiqueEntries.length > 0) {
+    for (let index = 0; index < round.critiqueEntries.length; index += 1) {
+      const entry = round.critiqueEntries[index];
+      const criticId = round.criticOrder[index] ?? entry.modelId ?? 'critic';
+      const criticName = criticId === 'critic' ? criticId : getModelDisplayName(criticId);
+      const modeLabel = round.critiqueMode === 'parallel'
+        ? '[parallel]'
+        : `[sequential ${index + 1}/${round.critiqueEntries.length}]`;
+      parts.push('');
+      parts.push(`### Critique ${index + 1} — ${criticName} ${modeLabel}`);
+      parts.push('');
+      parts.push(entry.content);
+    }
+  }
+
+  if (round.reviewEntry) {
+    const reviewName = round.reviewEntry.modelId ? getModelDisplayName(round.reviewEntry.modelId) : 'assistant';
+    parts.push('');
+    parts.push(`### Review — ${reviewName} (synthesising)`);
+    parts.push('');
+    parts.push(round.reviewEntry.content);
+  }
+
+  return parts.join('\n');
+}
+
+export function formatSaveOutput(
+  history: ConversationHistory,
+  replState: ReplState,
+  context: ContextState = {
+    path: null,
+    content: '',
+    expandedFiles: [],
+    skippedFiles: [],
+    warnings: [],
+    truncated: false,
+  },
+): string {
+  const proposer = getModelConfig(replState.proposerId);
+  const critics = replState.criticIds.map((criticId) => getModelConfig(criticId));
+  const rounds = history.getRounds();
+  return [
+    '# Gauntlet Session',
+    `Date: ${new Date().toISOString()}`,
+    `Proposer: ${proposer.displayName} (${proposer.model})`,
+    `Critics: ${critics.map((critic) => `${critic.displayName} (${critic.model})`).join(', ')}`,
+    `Context: ${context.path ?? 'none'}`,
+    '',
+    '---',
+    '',
+    ...rounds.flatMap((round, index) => (
+      index === rounds.length - 1
+        ? [renderRound(round)]
+        : [renderRound(round), '', '---', '']
+    )),
+  ].join('\n');
+}
+
+export async function saveHistory(
+  history: ConversationHistory,
+  cwd: string,
+  targetPath: string | undefined,
+  options: {
+    replState: ReplState;
+    context: ContextState;
+  },
+): Promise<string> {
   const timestamp = new Date().toISOString().replaceAll(':', '-');
   const resolvedPath = path.resolve(cwd, targetPath ?? `gauntlet-session-${timestamp}.md`);
-  const content = history
-    .getEntries()
-    .map((entry) => {
-      const label = entry.author === 'you' ? 'You' : entry.author === 'codex' ? 'Codex' : 'Opus';
-      return `## ${label}\n\n_${entry.timestamp}_\n\n${entry.content}\n`;
-    })
-    .join('\n');
+  const content = formatSaveOutput(history, options.replState, options.context);
 
   await writeFile(resolvedPath, content, 'utf8');
   history.markSaved();

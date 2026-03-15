@@ -1,39 +1,8 @@
-# 🗡️ Gauntlet
+# Gauntlet
 
-**Pit AI models against each other. Bad ideas don't survive.**
-
-Gauntlet is a terminal REPL that runs a structured debate between two AI models.
-One proposes from first principles. The other finds what was missed and pushes the
-answer further. You stay in control.
-
----
-
-## How it works
-
-Every turn in `/both` mode follows a strict asymmetric structure:
-
-**The proposer** (goes first):
-
-- Reasons from first principles — not the default industry answer
-- Names the biggest risk in its own response
-
-**The critic** (goes second):
-
-- Identifies what's critical and missing
-- Shows how to elevate the answer to the next level
-
-You can flip the order, address models directly, and carry context
-from your project into every session.
-
----
-
-## Prerequisites
-
-- Node.js 20+
-- An OpenAI API key
-- An Anthropic API key
-
----
+Gauntlet is a terminal REPL for structured AI debate.
+One model proposes from first principles. One or more critics
+challenge it. A synthesiser can then revise the answer.
 
 ## Install
 
@@ -45,220 +14,163 @@ cp .env.example .env
 # add your API keys to .env
 ```
 
-### Run without installing globally
+Run locally:
 
 ```bash
 npx tsx src/index.ts
 npx tsx src/index.ts --context ~/projects/myproject/context.md
 ```
 
-### Install globally (recommended)
+Install globally:
 
 ```bash
 npm run build
 npm install -g .
 gauntlet
-gauntlet --context ~/projects/myproject/context.md
 ```
-
----
 
 ## Configuration
 
-### API keys — `.env` (never committed)
+API keys live in `.env`:
 
-```
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-```
-
-### Models — `src/config.json` (committed, safe to share)
-
-```json
-{
-  "codex": {
-    "model": "gpt-5.4",
-    "displayName": "codex"
-  },
-  "opus": {
-    "model": "claude-opus-4-6",
-    "displayName": "opus"
-  }
-}
+```env
+ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
 ```
 
-To swap models, edit `src/config.json` and rebuild:
+Models live in [`src/config.json`](/Users/mohitthakur/Development/tools/gauntlet/src/config.json).
+Edit that file to change proposer/critic defaults, then rebuild:
 
 ```bash
 npm run build && npm install -g .
 ```
 
----
+## How it works
 
-## Usage
+Every session has one proposer and one or more critics.
 
-```
-┌─────────────────────────────────────────┐
-│  gauntlet                    ctrl+c/q   │
-└─────────────────────────────────────────┘
-Context: /projects/myproject/context.md
-Models:  codex (gpt-5.4)  ·  opus (claude-opus-4-6)
-Mode:    both
-──────────────────────────────────────────
-[codex → opus] ›
-```
+The proposer responds automatically to every query,
+reasoning from first principles and naming its own
+biggest risk.
 
-Type any question and both models respond in sequence.
-The proposer reasons from first principles. The critic elevates.
+Critics run only when you call `/critique`:
+- parallel: every critic independently sees only
+  the proposal — same input, independent views
+- sequential: each critic sees the proposal plus all
+  prior critiques in the chain, labeled by critic
 
-### Example session
-
-```
-[codex → opus] › Design a rate limiting strategy for a high-traffic API
-
-Codex ──────────────────────────────────────
-## First principles
-...
-
-## Biggest risk
-...
-
-Opus ───────────────────────────────────────
-## Missed
-...
-
-## Elevation
-...
-
-[codex → opus] › @codex incorporate the critique and rewrite
-[codex → opus] › @opus push the elevation further, be specific
-```
-
----
+After critiques, `/review` triggers a synthesiser that
+decides what to incorporate, what to push back on,
+and produces a revised response.
 
 ## Commands
 
-### 🔀 Routing
+```text
+Proposer & critics
+  /propose <id>                    Set who proposes
+  /critics [id...]                 Show or set critic list
 
-| Command              | Description                                  |
-| -------------------- | -------------------------------------------- |
-| `/both`              | Both models respond (default)                |
-| `/codex`             | Codex only — freeform, no enforced structure |
-| `/opus`              | Opus only — freeform, no enforced structure  |
-| `/order codex-first` | Codex proposes, Opus critiques (default)     |
-| `/order opus-first`  | Opus proposes, Codex critiques               |
+Critique
+  /critique                        Parallel (default order)
+  /critique parallel               Explicit parallel
+  /critique sequential             Sequential (default order)
+  /critique sequential <id> [id…]  Sequential (custom order)
+  /review [id]                     Synthesise all critiques
 
-### 🎯 Direct address
+Modes
+  /both                            Multi mode
+  /single <id>                     Single model freeform
+  /codex                           Shortcut: /single codex
+  /opus                            Shortcut: /single opus
 
-| Command            | Description                               |
-| ------------------ | ----------------------------------------- |
-| `@codex <message>` | One-turn message to Codex, mode unchanged |
-| `@opus <message>`  | One-turn message to Opus, mode unchanged  |
+Direct address
+  @<model> <message>               One-turn message, mode unchanged
 
-Use `@model` to follow up with a specific model without switching modes:
+Input
+  /load <path>                     Load file as next message
+  /context                         Show context metadata
+  /context reload                  Reload context.md from disk
 
-```
-@codex incorporate the critique and rewrite your proposal
-@opus push your elevation further, give a concrete example
-```
+Session
+  /save [path]                     Save session to markdown
+  /clear                           Clear history and rounds
+  /models                          Show available models
+  /help                            Show this help
 
-### 📂 Input
-
-| Command           | Description                          |
-| ----------------- | ------------------------------------ |
-| `/load <path>`    | Load a file and send as next message |
-| `/context`        | Show loaded context file             |
-| `/context reload` | Reload context.md from disk          |
-
-### 💾 Session
-
-| Command        | Description                          |
-| -------------- | ------------------------------------ |
-| `/save [path]` | Save full session to markdown        |
-| `/clear`       | Clear conversation history           |
-| `/models`      | Show current model names and strings |
-| `/help`        | Show all commands                    |
-
-### ⌨️ Keyboard
-
-| Key                 | Action                                    |
-| ------------------- | ----------------------------------------- |
-| `ctrl+c` at prompt  | Exit (save prompt if unsaved history)     |
-| `ctrl+c` mid-stream | Cancel current response, return to prompt |
-| `ctrl+d`            | Exit                                      |
-
----
-
-## Project context
-
-Add a `context.md` to any project directory. Gauntlet loads it
-automatically when you run from that directory.
-
-```bash
-cd ~/projects/myproject
-gauntlet  # picks up context.md automatically
+Keys
+  ctrl+c at prompt                 Exit (save prompt if history)
+  ctrl+c mid-stream                Cancel current response
 ```
 
-Or pass it explicitly:
+## context.md
+
+Add a `context.md` to any project directory.
+Gauntlet loads it automatically when you run from
+that directory, or pass it explicitly:
 
 ```bash
 gauntlet --context ~/projects/myproject/context.md
 ```
 
-**What to put in `context.md`:**
+If your file has a `## Project Context` section, only
+that section is used. Otherwise the full file is used.
 
-- Current task or decision you're working through
-- Architecture principles and constraints
-- What's already been tried and ruled out
-- Known risks or weak spots to probe
+Reference project files inline with `@file:`:
 
-Both models receive this context in their system prompts,
-so critiques are grounded in your actual project rather than
-generic advice.
+```markdown
+## Project Context
 
----
+### What this project is
+One paragraph.
 
-## Extending Gauntlet
+### Current task
+What decision is being worked on right now.
 
-The codebase is intentionally small and modular.
+### Hard constraints
+Non-negotiables the models must respect.
 
-### Add a third model
+### What was tried or ruled out
+Prevent repeated bad suggestions.
 
-1. Create `src/models/newmodel.ts` — implement the `ModelClient` interface from `src/types.ts`
-2. Add its config to `src/config.json`
-3. Register it in `src/repl.ts`
+### Known risks / weak spots
+Tell critics where to probe hardest.
 
-### Change the proposer/critic prompts
-
-Edit `src/prompts.ts` — all system prompt text lives there.
-No prompt text exists anywhere else in the codebase.
-
-### Change which models are used
-
-Edit `src/config.json` — model strings and display names.
-Rebuild and reinstall.
-
-### Architecture
-
-```
-src/
-├── index.ts        entry point, context loading, startup
-├── repl.ts         main REPL loop, turn routing, mode/order state
-├── config.ts       reads src/config.json, derives display names
-├── config.json     model names and strings (committed)
-├── prompts.ts      all system prompt text
-├── history.ts      shared conversation history
-├── commands.ts     slash command registry and handlers
-├── renderer.ts     terminal output, ANSI colours, prompt rendering
-├── context.ts      context.md loading
-├── types.ts        shared types: ModelRole, ReplState, HistoryEntry
-└── models/
-    ├── codex.ts    OpenAI client, streaming
-    └── opus.ts     Anthropic client, streaming
+### Relevant files
+@file: src/config.ts
+@file: ARCHITECTURE.md
 ```
 
----
+Files over 50KB are skipped with a warning.
+Total context is capped at 32,000 characters.
+All models receive the same project context.
 
-## License
+## Adding a new model
 
-MIT
+Step 1: add it to `src/config.json`.
+
+```json
+{
+  "models": [
+    { "id": "codex", "model": "gpt-5.4", "displayName": "codex", "provider": "openai" },
+    { "id": "opus", "model": "claude-opus-4-6", "displayName": "opus", "provider": "anthropic" },
+    { "id": "sonnet", "model": "claude-sonnet-4-6", "displayName": "sonnet", "provider": "anthropic" }
+  ],
+  "defaults": {
+    "proposerId": "codex",
+    "criticIds": ["sonnet"]
+  }
+}
+```
+
+Step 2: rebuild.
+
+```bash
+npm run build && npm install -g .
+```
+
+## Adding a new provider
+
+1. Create `src/models/gemini.ts` implementing `ModelClient`.
+2. Register it in `src/config.ts` inside `PROVIDERS`.
+3. Add `GEMINI_API_KEY` to `.env.example`.
+4. Add the model to `src/config.json` with `provider: "gemini"`.

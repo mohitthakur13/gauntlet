@@ -1,10 +1,20 @@
 {
-  "codex": {
-    "model": "gpt-5.4",
-    "displayName": "codex"
-  },
-  "opus": {
-    "model": "claude-opus-4-6",
-    "displayName": "opus"
+  "models": [
+    {
+      "id": "codex",
+      "model": "gpt-5.4",
+      "displayName": "codex",
+      "provider": "openai"
+    },
+    {
+      "id": "opus",
+      "model": "claude-opus-4-6",
+      "displayName": "opus",
+      "provider": "anthropic"
+    }
+  ],
+  "defaults": {
+    "proposerId": "codex",
+    "criticIds": ["opus"]
   }
 }

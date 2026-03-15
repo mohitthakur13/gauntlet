@@ -1,8 +1,6 @@
-import process from 'node:process';
 import Anthropic from '@anthropic-ai/sdk';
-import { OPUS_CONFIG } from '../config.js';
 import { formatEntryForModel } from '../history.js';
-import { buildSystemPrompt, CRITIC_PROMPT, FREEFORM_OPUS_PROMPT, PROPOSER_PROMPT } from '../prompts.js';
+import { buildSystemPrompt, FREEFORM_PROMPT, PARALLEL_CRITIC_PROMPT, PROPOSER_PROMPT, SYNTHESISER_PROMPT } from '../prompts.js';
 import type { HistoryEntry, ModelClient, ModelRole, StreamResult } from '../types.js';
 
 function isAbortError(error: unknown): boolean {
@@ -18,43 +16,8 @@ function getErrorMessage(error: unknown): string {
 
 function buildOpusMessages(
   history: HistoryEntry[],
-  role: ModelRole,
 ): Array<{ role: 'user' | 'assistant'; content: string }> {
-  if (history.length === 0) {
-    return [];
-  }
-
-  const entries = [...history];
-  const lastEntry = entries.at(-1);
-
-  if (role === 'critic' && lastEntry?.role === 'assistant' && lastEntry.author === 'codex') {
-    entries.pop();
-
-    const priorUserIndex = [...entries]
-      .map((entry, index) => ({ entry, index }))
-      .reverse()
-      .find(({ entry }) => entry.role === 'user')?.index;
-
-    const critiquePrompt = `User question: ${
-      priorUserIndex !== undefined ? entries[priorUserIndex].content : ''
-    }\n\nCodex responded with:\n${lastEntry.content}\n\nPlease critique this response.`;
-
-    if (priorUserIndex !== undefined) {
-      entries[priorUserIndex] = {
-        ...entries[priorUserIndex],
-        content: critiquePrompt,
-      };
-    } else {
-      entries.push({
-        role: 'user',
-        author: 'you',
-        content: critiquePrompt,
-        timestamp: new Date().toISOString(),
-      });
-    }
-  }
-
-  return entries.map((entry) => ({
+  return history.map((entry) => ({
     role: entry.role,
     content: formatEntryForModel(entry),
   }));
@@ -66,26 +29,32 @@ function selectSystemPrompt(context: string, role: ModelRole): string {
   }
 
   if (role === 'critic') {
-    return buildSystemPrompt(context, CRITIC_PROMPT);
+    return buildSystemPrompt(context, PARALLEL_CRITIC_PROMPT);
   }
 
-  return buildSystemPrompt(context, FREEFORM_OPUS_PROMPT);
+  if (role === 'synthesiser') {
+    return buildSystemPrompt(context, SYNTHESISER_PROMPT);
+  }
+
+  return buildSystemPrompt(context, FREEFORM_PROMPT);
 }
 
 async function streamOnce(params: {
   client: Anthropic;
+  model: string;
   history: HistoryEntry[];
   context: string;
   role: ModelRole;
+  systemPrompt?: string;
   signal: AbortSignal;
   write: (chunk: string) => void;
 }): Promise<StreamResult> {
   const stream = params.client.messages.stream(
     {
-      model: OPUS_CONFIG.model,
+      model: params.model,
       max_tokens: 4096,
-      system: selectSystemPrompt(params.context, params.role),
-      messages: buildOpusMessages(params.history, params.role),
+      system: params.systemPrompt ?? selectSystemPrompt(params.context, params.role),
+      messages: buildOpusMessages(params.history),
     },
     { signal: params.signal },
   );
@@ -106,15 +75,19 @@ async function streamOnce(params: {
 }
 
 export class OpusClient implements ModelClient {
-  readonly model = OPUS_CONFIG.model;
+  readonly id: string;
+  readonly model: string;
+  readonly displayName: string;
   private readonly client: Anthropic | null;
   private readonly initError: string | null;
 
-  constructor() {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+  constructor(id: string, model: string, displayName: string, apiKey: string) {
+    this.id = id;
+    this.model = model;
+    this.displayName = displayName;
     if (!apiKey) {
       this.client = null;
-      this.initError = `${OPUS_CONFIG.displayName} error: missing ANTHROPIC_API_KEY`;
+      this.initError = `${this.displayName} error: missing ANTHROPIC_API_KEY`;
       return;
     }
 
@@ -126,19 +99,22 @@ export class OpusClient implements ModelClient {
     history: HistoryEntry[];
     context: string;
     role: ModelRole;
+    systemPrompt?: string;
     signal: AbortSignal;
     write: (chunk: string) => void;
   }): Promise<StreamResult> {
     if (!this.client) {
-      throw new Error(this.initError ?? `${OPUS_CONFIG.displayName} error: client unavailable`);
+      throw new Error(this.initError ?? `${this.displayName} error: client unavailable`);
     }
 
     try {
       return await streamOnce({
         client: this.client,
+        model: this.model,
         history: input.history,
         context: input.context,
         role: input.role,
+        systemPrompt: input.systemPrompt,
         signal: input.signal,
         write: input.write,
       });
@@ -147,7 +123,7 @@ export class OpusClient implements ModelClient {
         return { text: '', cancelled: true, skipped: false };
       }
 
-      throw new Error(`${OPUS_CONFIG.displayName} error: ${getErrorMessage(error)}`);
+      throw new Error(`${this.displayName} error: ${getErrorMessage(error)}`);
     }
   }
 }

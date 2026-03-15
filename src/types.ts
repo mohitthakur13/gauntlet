@@ -1,31 +1,44 @@
-export type ActiveMode = 'both' | 'codex' | 'opus';
+export type ModelId = string;
 
-export type ActiveOrder = 'codex-first' | 'opus-first';
+export type CritiqueMode = 'parallel' | 'sequential';
+
+export type ModelRole = 'proposer' | 'critic' | 'synthesiser' | 'freeform';
 
 export interface ReplState {
-  mode: ActiveMode;
-  order: ActiveOrder;
-  hasHistory: boolean;
+  mode: 'multi' | 'single';
+  proposerId: string;
+  criticIds: string[];
+  singleModelId: string | null;
   isStreaming: boolean;
-  streamingTarget?: ModelName | null;
+  streamingTarget: string | null;
 }
-
-export type ModelName = 'codex' | 'opus';
-
-export type ModelRole = 'proposer' | 'critic' | 'freeform';
 
 export type HistoryRole = 'user' | 'assistant';
 
 export interface HistoryEntry {
   role: HistoryRole;
   content: string;
-  author: 'you' | ModelName;
-  timestamp: string;
+  modelId?: string;
+  entryRole?: ModelRole;
+}
+
+export interface Round {
+  number: number;
+  question: string;
+  proposerEntry: HistoryEntry;
+  critiqueEntries: HistoryEntry[];
+  critiqueMode: CritiqueMode | null;
+  criticOrder: string[];
+  reviewEntry: HistoryEntry | null;
 }
 
 export interface ContextState {
   path: string | null;
   content: string;
+  expandedFiles: string[];
+  skippedFiles: string[];
+  warnings: string[];
+  truncated: boolean;
 }
 
 export interface ContextResolver {
@@ -40,14 +53,29 @@ export interface StreamResult {
 }
 
 export interface ModelClient {
+  readonly id: ModelId;
   readonly model: string;
+  readonly displayName: string;
   streamResponse(input: {
     history: HistoryEntry[];
     context: string;
     role: ModelRole;
+    systemPrompt?: string;
     signal: AbortSignal;
     write: (chunk: string) => void;
   }): Promise<StreamResult>;
+}
+
+export interface ModelDefinition {
+  id: ModelId;
+  model: string;
+  displayName: string;
+  provider: string;
+}
+
+export interface ModelDefaults {
+  proposerId: ModelId;
+  criticIds: ModelId[];
 }
 
 export interface CommandContext {
@@ -55,13 +83,17 @@ export interface CommandContext {
   repl: ReplState;
   context: ContextState;
   historyLength: number;
-  codexModel: string;
-  opusModel: string;
+  models: ModelDefinition[];
+  defaults: ModelDefaults;
 }
 
 export type CommandResult =
-  | { type: 'mode'; mode: ActiveMode; message: string }
-  | { type: 'order'; order?: ActiveOrder; message: string }
+  | { type: 'mode'; mode: 'multi'; message: string }
+  | { type: 'mode'; mode: 'single'; modelId: ModelId; message: string }
+  | { type: 'propose'; modelId: ModelId; message: string }
+  | { type: 'critics'; criticIds?: ModelId[]; message: string }
+  | { type: 'critique'; mode: CritiqueMode; criticIds: ModelId[] }
+  | { type: 'review'; modelId?: ModelId }
   | { type: 'info'; message: string }
   | { type: 'input'; content: string; display: string }
   | { type: 'clear' }

@@ -5,18 +5,21 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "bin": {
     "gauntlet": "dist/index.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "latest",
-    "openai": "latest",
-    "dotenv": "latest"
+    "dotenv": "latest",
+    "openai": "latest"
   },
   "devDependencies": {
     "tsx": "latest",
-    "typescript": "latest"
+    "typescript": "latest",
+    "vitest": "^3.2.4"
   }
 }

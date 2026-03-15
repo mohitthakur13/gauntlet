@@ -1,6 +1,6 @@
 import process from 'node:process';
-import { CODEX_CONFIG, getModelDisplayName, OPUS_CONFIG } from './config.js';
-import type { ModelName, ReplState } from './types.js';
+import { getModelDisplayName } from './config.js';
+import type { ModelClient, ModelId, ReplState } from './types.js';
 
 type ColorName = 'reset' | 'dim' | 'red' | 'yellow' | 'cyan' | 'purple' | 'white';
 
@@ -14,15 +14,67 @@ const ANSI: Record<ColorName, string> = {
   white: '\u001b[37m',
 };
 
+function useColor(): boolean {
+  return process.stdout.isTTY;
+}
+
+function color(text: string, colorName: ColorName): string {
+  if (!useColor()) {
+    return text;
+  }
+
+  return `${ANSI[colorName]}${text}${ANSI.reset}`;
+}
+
+function getDisplayName(id: ModelId): string {
+  try {
+    return getModelDisplayName(id);
+  } catch {
+    return id;
+  }
+}
+
+export function renderPrompt(state: ReplState): string {
+  if (state.isStreaming) {
+    const label = state.streamingTarget ? `streaming ${state.streamingTarget}...` : 'streaming...';
+    return `${color(`[${label}]`, 'dim')} ${color('›', 'white')} `;
+  }
+
+  if (state.mode === 'single' && state.singleModelId) {
+    return `${color(`[${getDisplayName(state.singleModelId)}]`, 'cyan')} ${color('›', 'white')} `;
+  }
+
+  const proposer = getDisplayName(state.proposerId);
+  const critics = state.criticIds.map((criticId) => getDisplayName(criticId));
+  const criticLabel = critics.length <= 2
+    ? critics.join(', ')
+    : `${critics.slice(0, 2).join(', ')} +${critics.length - 2}`;
+
+  return `${color(`[${proposer} → ${criticLabel}]`, 'cyan')} ${color('›', 'white')} `;
+}
+
+export function renderCriticHeader(
+  displayName: string,
+  mode: 'parallel' | 'sequential',
+  position?: number,
+  total?: number,
+): string {
+  const label = mode === 'parallel'
+    ? `${displayName} [parallel]`
+    : `${displayName} [${position}/${total}]`;
+  const line = Math.max(1, 40 - label.length);
+  return `\n${color(label, 'cyan')} ${color('─'.repeat(line), 'dim')}\n`;
+}
+
+export function renderSynthesiserHeader(displayName: string): string {
+  const label = `${displayName} (synthesising)`;
+  const line = Math.max(1, 40 - label.length);
+  return `\n${color(label, 'cyan')} ${color('─'.repeat(line), 'dim')}\n`;
+}
+
 export class Renderer {
-  private readonly useColor = process.stdout.isTTY;
-
-  color(text: string, color: ColorName): string {
-    if (!this.useColor) {
-      return text;
-    }
-
-    return `${ANSI[color]}${text}${ANSI.reset}`;
+  color(text: string, colorName: ColorName): string {
+    return color(text, colorName);
   }
 
   print(text = ''): void {
@@ -33,12 +85,12 @@ export class Renderer {
     process.stdout.write(text);
   }
 
-  banner(contextPath: string | null, codexModel: string, opusModel: string, state: ReplState): void {
+  banner(contextPath: string | null, clients: ModelClient[], state: ReplState): void {
     this.print('┌─────────────────────────────────────────┐');
     this.print('│  gauntlet                    ctrl+c/q   │');
     this.print('└─────────────────────────────────────────┘');
     this.print(`Context: ${contextPath ?? 'none'}`);
-    this.print(`Models:  ${CODEX_CONFIG.displayName} (${codexModel})  ·  ${OPUS_CONFIG.displayName} (${opusModel})`);
+    this.print(`Models:  ${clients.map((client) => `${client.displayName} (${client.model})`).join('  ·  ')}`);
     this.print(`Mode:    ${state.mode}`);
     this.separator();
   }
@@ -47,38 +99,27 @@ export class Renderer {
     this.print(this.color('──────────────────────────────────────────', 'dim'));
   }
 
-  renderPrompt(state: ReplState): string {
-    if (state.isStreaming) {
-      if (!state.streamingTarget) {
-        return this.color('[streaming...]', 'dim');
-      }
-
-      return `${this.color('[', 'cyan')}${this.color('→', 'dim')} ${this.color(getModelDisplayName(state.streamingTarget), 'cyan')}${this.color(']', 'cyan')} ${this.color('streaming...', 'dim')}`;
-    }
-
-    if (state.mode === 'codex') {
-      return `${this.color(`[${CODEX_CONFIG.displayName}]`, 'cyan')} ${this.color('›', 'white')} `;
-    }
-
-    if (state.mode === 'opus') {
-      return `${this.color(`[${OPUS_CONFIG.displayName}]`, 'cyan')} ${this.color('›', 'white')} `;
-    }
-
-    const label = state.order === 'codex-first'
-      ? `${this.color(`[${CODEX_CONFIG.displayName} `, 'cyan')}${this.color('→', 'dim')}${this.color(` ${OPUS_CONFIG.displayName}]`, 'cyan')}`
-      : `${this.color(`[${OPUS_CONFIG.displayName} `, 'cyan')}${this.color('→', 'dim')}${this.color(` ${CODEX_CONFIG.displayName}]`, 'cyan')}`;
-
-    return `${label} ${this.color('›', 'white')} `;
+  renderPrompt(state: ReplState, clients: Map<ModelId, ModelClient>): string {
+    void clients;
+    return renderPrompt(state);
   }
 
-  modelHeader(model: ModelName): string {
-    const label = model === 'codex'
-      ? this.color(getModelDisplayName('codex'), 'cyan')
-      : this.color(getModelDisplayName('opus'), 'purple');
-    const line = model === 'codex'
-      ? '──────────────────────────────────────'
-      : '───────────────────────────────────────';
-    return `${label} ${this.color(line, 'dim')}`;
+  renderModelHeader(displayName: string): string {
+    const line = Math.max(1, 40 - displayName.length);
+    return `${this.color(displayName, 'cyan')} ${this.color('─'.repeat(line), 'dim')}`;
+  }
+
+  renderCriticHeader(
+    displayName: string,
+    mode: 'parallel' | 'sequential',
+    position?: number,
+    total?: number,
+  ): string {
+    return renderCriticHeader(displayName, mode, position, total);
+  }
+
+  renderSynthesiserHeader(displayName: string): string {
+    return renderSynthesiserHeader(displayName);
   }
 
   info(message: string): void {

@@ -3,8 +3,7 @@
 import dotenv from 'dotenv';
 import { readFile } from 'node:fs/promises';
 import process from 'node:process';
-import { CodexClient } from './models/codex.js';
-import { OpusClient } from './models/opus.js';
+import { createClients } from './config.js';
 import { startRepl } from './repl.js';
 
 function parseArgs(argv: string[]): { contextPath?: string } {
@@ -27,8 +26,7 @@ async function main(): Promise<void> {
       cwd: process.cwd(),
       explicitPath: args.contextPath,
     },
-    codex: new CodexClient(),
-    opus: new OpusClient(),
+    clients: createClients(),
   });
 }
 
