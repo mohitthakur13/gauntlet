@@ -21,6 +21,47 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
+function buildCodexMessages(history: HistoryEntry[]): Array<{ role: 'user' | 'assistant'; content: string }> {
+  if (history.length === 0) {
+    return [];
+  }
+
+  const entries = [...history];
+  const lastEntry = entries.at(-1);
+
+  if (lastEntry?.role === 'assistant' && lastEntry.author === 'opus') {
+    entries.pop();
+
+    const priorUserIndex = [...entries]
+      .map((entry, index) => ({ entry, index }))
+      .reverse()
+      .find(({ entry }) => entry.role === 'user')?.index;
+
+    const critiquePrompt = `User question: ${
+      priorUserIndex !== undefined ? entries[priorUserIndex].content : ''
+    }\n\nOpus responded with:\n${lastEntry.content}\n\nPlease critique this response.`;
+
+    if (priorUserIndex !== undefined) {
+      entries[priorUserIndex] = {
+        ...entries[priorUserIndex],
+        content: critiquePrompt,
+      };
+    } else {
+      entries.push({
+        role: 'user',
+        author: 'you',
+        content: critiquePrompt,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }
+
+  return entries.map((entry) => ({
+    role: entry.role,
+    content: formatEntryForModel(entry),
+  }));
+}
+
 async function streamOnce(params: {
   client: OpenAI;
   model: string;
@@ -35,10 +76,7 @@ async function streamOnce(params: {
       stream: true,
       messages: [
         { role: 'system', content: buildSystemPrompt(params.context) },
-        ...params.history.map((entry) => ({
-          role: entry.role,
-          content: formatEntryForModel(entry),
-        })),
+        ...buildCodexMessages(params.history),
       ],
     },
     { signal: params.signal },

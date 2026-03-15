@@ -1,5 +1,5 @@
 import process from 'node:process';
-import type { Mode, ModelName } from './types.js';
+import type { ModelName, ReplState } from './types.js';
 
 type ColorName = 'reset' | 'dim' | 'red' | 'yellow' | 'cyan' | 'purple' | 'white';
 
@@ -32,13 +32,13 @@ export class Renderer {
     process.stdout.write(text);
   }
 
-  banner(contextPath: string | null, codexModel: string, opusModel: string, mode: Mode): void {
+  banner(contextPath: string | null, codexModel: string, opusModel: string, state: ReplState): void {
     this.print('┌─────────────────────────────────────────┐');
-    this.print('│  critique                    ctrl+c/q   │');
+    this.print('│  gauntlet                    ctrl+c/q   │');
     this.print('└─────────────────────────────────────────┘');
     this.print(`Context: ${contextPath ?? 'none'}`);
     this.print(`Models:  Codex (${codexModel})  ·  Opus (${opusModel})`);
-    this.print(`Mode:    ${mode}`);
+    this.print(`Mode:    ${state.mode}`);
     this.separator();
   }
 
@@ -46,8 +46,24 @@ export class Renderer {
     this.print(this.color('──────────────────────────────────────────', 'dim'));
   }
 
-  promptLabel(mode: Mode): string {
-    return `[${mode}] You: `;
+  renderPrompt(state: ReplState): string {
+    if (state.isStreaming) {
+      return this.color('[streaming...]', 'dim');
+    }
+
+    if (state.mode === 'codex') {
+      return `${this.color('[codex]', 'cyan')} ${this.color('›', 'white')} `;
+    }
+
+    if (state.mode === 'opus') {
+      return `${this.color('[opus]', 'cyan')} ${this.color('›', 'white')} `;
+    }
+
+    const label = state.order === 'codex-first'
+      ? `${this.color('[codex ', 'cyan')}${this.color('→', 'dim')}${this.color(' opus]', 'cyan')}`
+      : `${this.color('[opus ', 'cyan')}${this.color('→', 'dim')}${this.color(' codex]', 'cyan')}`;
+
+    return `${label} ${this.color('›', 'white')} `;
   }
 
   modelHeader(model: ModelName): string {

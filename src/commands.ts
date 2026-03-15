@@ -2,7 +2,11 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { previewContext } from './context.js';
 import { ConversationHistory } from './history.js';
-import type { CommandContext, CommandResult } from './types.js';
+import type { ActiveOrder, CommandContext, CommandResult } from './types.js';
+
+function formatOrder(order: ActiveOrder): string {
+  return order === 'codex-first' ? 'Order: codex → opus' : 'Order: opus → codex';
+}
 
 export function parseCommand(input: string, context: CommandContext): CommandResult {
   const trimmed = input.trim();
@@ -20,6 +24,23 @@ export function parseCommand(input: string, context: CommandContext): CommandRes
       return { type: 'mode', mode: 'opus', message: 'Mode set to opus.' };
     case '/both':
       return { type: 'mode', mode: 'both', message: 'Mode set to both.' };
+    case '/order':
+      if (context.repl.mode !== 'both') {
+        return {
+          type: 'info',
+          message: 'Order only applies in /both mode. Switch with /both first.',
+        };
+      }
+
+      if (!arg) {
+        return { type: 'order', message: formatOrder(context.repl.order) };
+      }
+
+      if (arg !== 'codex-first' && arg !== 'opus-first') {
+        return { type: 'info', message: 'Usage: /order codex-first|opus-first' };
+      }
+
+      return { type: 'order', order: arg, message: formatOrder(arg) };
     case '/load':
       if (!arg) {
         return { type: 'info', message: 'Usage: /load <path>' };
@@ -43,17 +64,26 @@ export function parseCommand(input: string, context: CommandContext): CommandRes
       return {
         type: 'info',
         message: [
-          '/codex        Switch to CODEX mode',
-          '/opus         Switch to OPUS mode',
-          '/both         Switch to BOTH mode',
-          '/load <path>  Load a file and send it as the next user message',
-          '/context      Show the loaded context',
-          '/context reload  Reload context.md from disk',
-          '/clear        Clear conversation history',
-          '/save [path]  Save the session to markdown',
-          '/models       Show model names',
-          '/help         Show all commands',
-          '/exit or /q   Exit the REPL',
+          'Routing',
+          '  /codex              Only Codex responds',
+          '  /opus               Only Opus responds',
+          '  /both               Both models respond (default)',
+          '  /order codex-first  Codex responds first, Opus critiques',
+          '  /order opus-first   Opus responds first, Codex critiques',
+          '',
+          'Input',
+          '  /load <path>        Load a file as the next user message',
+          '  /context            Show loaded context file',
+          '  /context reload     Reload context.md from disk',
+          '',
+          'Session',
+          '  /save [path]        Save session to markdown',
+          '  /clear              Clear conversation history',
+          '  /models             Show current model names',
+          '',
+          'Utility',
+          '  /help               Show this help',
+          '  /exit or /q         Exit gauntlet',
         ].join('\n'),
       };
     case '/exit':
@@ -71,7 +101,7 @@ export async function resolveLoadedInput(cwd: string, relativePath: string): Pro
 
 export async function saveHistory(history: ConversationHistory, cwd: string, targetPath?: string): Promise<string> {
   const timestamp = new Date().toISOString().replaceAll(':', '-');
-  const resolvedPath = path.resolve(cwd, targetPath ?? `critique-session-${timestamp}.md`);
+  const resolvedPath = path.resolve(cwd, targetPath ?? `gauntlet-session-${timestamp}.md`);
   const content = history
     .getEntries()
     .map((entry) => {

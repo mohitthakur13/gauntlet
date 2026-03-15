@@ -1,5 +1,5 @@
 {
-  "name": "critique",
+  "name": "gauntlet",
   "version": "0.1.0",
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "dev": "tsx watch src/index.ts"
   },
   "bin": {
-    "critique": "dist/index.js"
+    "gauntlet": "dist/index.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "latest",

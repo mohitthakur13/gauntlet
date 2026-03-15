@@ -4,12 +4,28 @@ import { loadContext } from './context.js';
 import { parseCommand, resolveLoadedInput, saveHistory } from './commands.js';
 import { ConversationHistory } from './history.js';
 import { Renderer } from './renderer.js';
-import type { ContextResolver, Mode, ModelClient } from './types.js';
+import type { ContextResolver, ModelClient, ModelName, ReplState } from './types.js';
 
-type ReplState = 'prompt' | 'streaming' | 'confirming';
+type PromptPhase = 'prompt' | 'confirming';
 
-function question(rl: ReadlineInterface, prompt: string): Promise<string> {
-  return new Promise((resolve) => rl.question(prompt, resolve));
+function question(rl: ReadlineInterface, prompt: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const finish = (value: string | null): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      (rl as unknown as { removeListener: (event: string, listener: () => void) => void }).removeListener('close', onClose);
+      resolve(value);
+    };
+
+    const onClose = (): void => finish(null);
+
+    (rl as unknown as { on: (event: string, listener: () => void) => void }).on('close', onClose);
+    rl.question(prompt, (answer) => finish(answer));
+  });
 }
 
 export async function startRepl(params: {
@@ -21,10 +37,16 @@ export async function startRepl(params: {
   const renderer = new Renderer();
   const history = new ConversationHistory();
   let context = await loadContext(params.resolver);
-  let mode: Mode = 'both';
-  let state: ReplState = 'prompt';
+  let replState: ReplState = {
+    mode: 'both',
+    order: 'codex-first',
+    hasHistory: false,
+    isStreaming: false,
+  };
+  let phase: PromptPhase = 'prompt';
   let abortController: AbortController | null = null;
   let exiting = false;
+  let closed = false;
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -33,16 +55,16 @@ export async function startRepl(params: {
   });
 
   const confirm = async (prompt: string): Promise<string> => {
-    state = 'confirming';
+    phase = 'confirming';
     try {
-      return (await question(rl, prompt)).trim();
+      return ((await question(rl, prompt)) ?? '').trim();
     } finally {
-      state = 'prompt';
+      phase = 'prompt';
     }
   };
 
   const saveIfRequested = async (): Promise<boolean> => {
-    if (!history.hasUnsavedChanges()) {
+    if (!replState.hasHistory || !history.hasUnsavedChanges()) {
       return true;
     }
 
@@ -74,24 +96,39 @@ export async function startRepl(params: {
     rl.close();
   };
 
-  rl.on('SIGINT', () => {
-    if (state === 'streaming') {
+  const onSigint = (): void => {
+    if (replState.isStreaming) {
       abortController?.abort();
+      replState = { ...replState, isStreaming: false };
+      return;
+    }
+    if (phase === 'confirming') {
       return;
     }
     void handleExit();
-  });
+  };
 
   rl.on('close', () => {
-    process.stdout.write('\n');
-    process.exit(0);
+    closed = true;
   });
 
-  renderer.banner(context.path, params.codex.model, params.opus.model, mode);
+  rl.on('SIGINT', onSigint);
+  process.on('SIGINT', onSigint);
 
-  while (true) {
-    state = 'prompt';
-    const rawInput = await question(rl, renderer.promptLabel(mode));
+  const cleanup = (): void => {
+    process.removeListener('SIGINT', onSigint);
+  };
+
+  renderer.banner(context.path, params.codex.model, params.opus.model, replState);
+
+  while (!closed) {
+    phase = 'prompt';
+    const rawInput = await question(rl, renderer.renderPrompt(replState));
+    if (rawInput === null) {
+      await handleExit();
+      break;
+    }
+
     const input = rawInput.trim();
     if (!input) {
       continue;
@@ -99,7 +136,7 @@ export async function startRepl(params: {
 
     const command = parseCommand(input, {
       cwd: params.cwd,
-      mode,
+      repl: replState,
       context,
       historyLength: history.count(),
       codexModel: params.codex.model,
@@ -108,7 +145,15 @@ export async function startRepl(params: {
 
     if (command.type !== 'noop') {
       if (command.type === 'mode') {
-        mode = command.mode;
+        replState = { ...replState, mode: command.mode };
+        renderer.info(command.message);
+        continue;
+      }
+
+      if (command.type === 'order') {
+        if (command.order) {
+          replState = { ...replState, order: command.order };
+        }
         renderer.info(command.message);
         continue;
       }
@@ -128,6 +173,7 @@ export async function startRepl(params: {
         const answer = await confirm('Clear history? [y/n] ');
         if (answer.toLowerCase() === 'y') {
           history.clear();
+          replState = { ...replState, hasHistory: false };
           renderer.info('History cleared.');
         }
         continue;
@@ -145,13 +191,13 @@ export async function startRepl(params: {
 
       if (command.type === 'exit') {
         await handleExit();
-        return;
+        break;
       }
 
       if (command.type === 'input') {
         try {
           const loaded = await resolveLoadedInput(params.cwd, command.display);
-          await runTurn(loaded, mode);
+          await runTurn(loaded);
         } catch (error) {
           renderer.error(`Failed to load file: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -159,28 +205,52 @@ export async function startRepl(params: {
       }
     }
 
-    await runTurn(rawInput, mode);
+    await runTurn(rawInput);
   }
 
-  async function runTurn(message: string, currentMode: Mode): Promise<void> {
-    history.addUserMessage(message);
+  cleanup();
+  process.stdout.write('\n');
 
-    if (currentMode === 'codex' || currentMode === 'both') {
+  async function runTurn(message: string): Promise<void> {
+    history.addUserMessage(message);
+    replState = { ...replState, hasHistory: true };
+
+    if (replState.mode === 'codex') {
       const codexText = await streamModel('codex', params.codex);
-      if (codexText === null) {
-        renderer.separator();
-        return;
+      if (codexText !== null) {
+        history.addAssistantMessage('codex', codexText);
       }
-      history.addAssistantMessage('codex', codexText);
+      renderer.separator();
+      return;
     }
 
-    if (currentMode === 'opus' || currentMode === 'both') {
+    if (replState.mode === 'opus') {
       const opusText = await streamModel('opus', params.opus);
-      if (opusText === null) {
+      if (opusText !== null) {
+        history.addAssistantMessage('opus', opusText);
+      }
+      renderer.separator();
+      return;
+    }
+
+    const sequence: Array<{ label: ModelName; client: ModelClient }> =
+      replState.order === 'codex-first'
+        ? [
+            { label: 'codex', client: params.codex },
+            { label: 'opus', client: params.opus },
+          ]
+        : [
+            { label: 'opus', client: params.opus },
+            { label: 'codex', client: params.codex },
+          ];
+
+    for (const step of sequence) {
+      const text = await streamModel(step.label, step.client);
+      if (text === null) {
         renderer.separator();
         return;
       }
-      history.addAssistantMessage('opus', opusText);
+      history.addAssistantMessage(step.label, text);
     }
 
     renderer.separator();
@@ -191,7 +261,7 @@ export async function startRepl(params: {
     renderer.print(renderer.modelHeader(label));
 
     abortController = new AbortController();
-    state = 'streaming';
+    replState = { ...replState, isStreaming: true };
 
     try {
       const result = await client.streamResponse({
@@ -221,7 +291,7 @@ export async function startRepl(params: {
       return null;
     } finally {
       abortController = null;
-      state = 'prompt';
+      replState = { ...replState, isStreaming: false };
     }
   }
 }

@@ -1,4 +1,13 @@
-export type Mode = 'both' | 'codex' | 'opus';
+export type ActiveMode = 'both' | 'codex' | 'opus';
+
+export type ActiveOrder = 'codex-first' | 'opus-first';
+
+export interface ReplState {
+  mode: ActiveMode;
+  order: ActiveOrder;
+  hasHistory: boolean;
+  isStreaming: boolean;
+}
 
 export type ModelName = 'codex' | 'opus';
 
@@ -39,7 +48,7 @@ export interface ModelClient {
 
 export interface CommandContext {
   cwd: string;
-  mode: Mode;
+  repl: ReplState;
   context: ContextState;
   historyLength: number;
   codexModel: string;
@@ -47,7 +56,8 @@ export interface CommandContext {
 }
 
 export type CommandResult =
-  | { type: 'mode'; mode: Mode; message: string }
+  | { type: 'mode'; mode: ActiveMode; message: string }
+  | { type: 'order'; order?: ActiveOrder; message: string }
   | { type: 'info'; message: string }
   | { type: 'input'; content: string; display: string }
   | { type: 'clear' }
