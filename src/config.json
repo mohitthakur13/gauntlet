@@ -1,0 +1,10 @@
+{
+  "codex": {
+    "model": "gpt-5.4",
+    "displayName": "codex"
+  },
+  "opus": {
+    "model": "claude-opus-4-6",
+    "displayName": "opus"
+  }
+}

@@ -7,6 +7,7 @@ export interface ReplState {
   order: ActiveOrder;
   hasHistory: boolean;
   isStreaming: boolean;
+  streamingTarget?: ModelName | null;
 }
 
 export type ModelName = 'codex' | 'opus';

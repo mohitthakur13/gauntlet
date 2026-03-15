@@ -1,4 +1,5 @@
 import process from 'node:process';
+import { CODEX_CONFIG, getModelDisplayName, OPUS_CONFIG } from './config.js';
 import type { ModelName, ReplState } from './types.js';
 
 type ColorName = 'reset' | 'dim' | 'red' | 'yellow' | 'cyan' | 'purple' | 'white';
@@ -37,7 +38,7 @@ export class Renderer {
     this.print('│  gauntlet                    ctrl+c/q   │');
     this.print('└─────────────────────────────────────────┘');
     this.print(`Context: ${contextPath ?? 'none'}`);
-    this.print(`Models:  Codex (${codexModel})  ·  Opus (${opusModel})`);
+    this.print(`Models:  ${CODEX_CONFIG.displayName} (${codexModel})  ·  ${OPUS_CONFIG.displayName} (${opusModel})`);
     this.print(`Mode:    ${state.mode}`);
     this.separator();
   }
@@ -48,26 +49,32 @@ export class Renderer {
 
   renderPrompt(state: ReplState): string {
     if (state.isStreaming) {
-      return this.color('[streaming...]', 'dim');
+      if (!state.streamingTarget) {
+        return this.color('[streaming...]', 'dim');
+      }
+
+      return `${this.color('[', 'cyan')}${this.color('→', 'dim')} ${this.color(getModelDisplayName(state.streamingTarget), 'cyan')}${this.color(']', 'cyan')} ${this.color('streaming...', 'dim')}`;
     }
 
     if (state.mode === 'codex') {
-      return `${this.color('[codex]', 'cyan')} ${this.color('›', 'white')} `;
+      return `${this.color(`[${CODEX_CONFIG.displayName}]`, 'cyan')} ${this.color('›', 'white')} `;
     }
 
     if (state.mode === 'opus') {
-      return `${this.color('[opus]', 'cyan')} ${this.color('›', 'white')} `;
+      return `${this.color(`[${OPUS_CONFIG.displayName}]`, 'cyan')} ${this.color('›', 'white')} `;
     }
 
     const label = state.order === 'codex-first'
-      ? `${this.color('[codex ', 'cyan')}${this.color('→', 'dim')}${this.color(' opus]', 'cyan')}`
-      : `${this.color('[opus ', 'cyan')}${this.color('→', 'dim')}${this.color(' codex]', 'cyan')}`;
+      ? `${this.color(`[${CODEX_CONFIG.displayName} `, 'cyan')}${this.color('→', 'dim')}${this.color(` ${OPUS_CONFIG.displayName}]`, 'cyan')}`
+      : `${this.color(`[${OPUS_CONFIG.displayName} `, 'cyan')}${this.color('→', 'dim')}${this.color(` ${CODEX_CONFIG.displayName}]`, 'cyan')}`;
 
     return `${label} ${this.color('›', 'white')} `;
   }
 
   modelHeader(model: ModelName): string {
-    const label = model === 'codex' ? this.color('Codex', 'cyan') : this.color('Opus', 'purple');
+    const label = model === 'codex'
+      ? this.color(getModelDisplayName('codex'), 'cyan')
+      : this.color(getModelDisplayName('opus'), 'purple');
     const line = model === 'codex'
       ? '──────────────────────────────────────'
       : '───────────────────────────────────────';

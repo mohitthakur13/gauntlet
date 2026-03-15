@@ -1,5 +1,6 @@
 import readline, { type Interface as ReadlineInterface } from 'node:readline';
 import process from 'node:process';
+import { getModelDisplayName, resolveModelAddress } from './config.js';
 import { loadContext } from './context.js';
 import { parseCommand, resolveLoadedInput, saveHistory } from './commands.js';
 import { ConversationHistory } from './history.js';
@@ -8,7 +9,11 @@ import type { ContextResolver, ModelClient, ModelName, ModelRole, ReplState } fr
 
 type PromptPhase = 'prompt' | 'confirming';
 
-function question(rl: ReadlineInterface, prompt: string): Promise<string | null> {
+function question(
+  rl: ReadlineInterface,
+  prompt: string,
+  setPendingFinish?: (finish: (() => void) | null) => void,
+): Promise<string | null> {
   return new Promise((resolve) => {
     let settled = false;
 
@@ -17,12 +22,14 @@ function question(rl: ReadlineInterface, prompt: string): Promise<string | null>
         return;
       }
       settled = true;
+      setPendingFinish?.(null);
       (rl as unknown as { removeListener: (event: string, listener: () => void) => void }).removeListener('close', onClose);
       resolve(value);
     };
 
     const onClose = (): void => finish(null);
 
+    setPendingFinish?.(() => finish(null));
     (rl as unknown as { on: (event: string, listener: () => void) => void }).on('close', onClose);
     rl.question(prompt, (answer) => finish(answer));
   });
@@ -42,9 +49,12 @@ export async function startRepl(params: {
     order: 'codex-first',
     hasHistory: false,
     isStreaming: false,
+    streamingTarget: null,
   };
   let phase: PromptPhase = 'prompt';
   let abortController: AbortController | null = null;
+  let pendingPromptFinish: (() => void) | null = null;
+  let exitRequested = false;
   let exiting = false;
   let closed = false;
 
@@ -88,6 +98,7 @@ export async function startRepl(params: {
       return;
     }
     exiting = true;
+    exitRequested = false;
     const okayToExit = await saveIfRequested();
     if (!okayToExit) {
       exiting = false;
@@ -99,12 +110,19 @@ export async function startRepl(params: {
   const onSigint = (): void => {
     if (replState.isStreaming) {
       abortController?.abort();
-      replState = { ...replState, isStreaming: false };
+      replState = { ...replState, isStreaming: false, streamingTarget: null };
       return;
     }
     if (phase === 'confirming') {
       return;
     }
+
+    if (pendingPromptFinish) {
+      exitRequested = true;
+      pendingPromptFinish();
+      return;
+    }
+
     void handleExit();
   };
 
@@ -112,25 +130,40 @@ export async function startRepl(params: {
     closed = true;
   });
 
-  rl.on('SIGINT', onSigint);
   process.on('SIGINT', onSigint);
-
-  const cleanup = (): void => {
-    process.removeListener('SIGINT', onSigint);
-  };
 
   renderer.banner(context.path, params.codex.model, params.opus.model, replState);
 
   while (!closed) {
     phase = 'prompt';
-    const rawInput = await question(rl, renderer.renderPrompt(replState));
+    const rawInput = await question(rl, renderer.renderPrompt(replState), (finish) => {
+      pendingPromptFinish = finish;
+    });
     if (rawInput === null) {
-      await handleExit();
+      if (exitRequested) {
+        await handleExit();
+      }
       break;
     }
 
     const input = rawInput.trim();
     if (!input) {
+      continue;
+    }
+
+    const directAddress = parseDirectAddress(input);
+    if (directAddress) {
+      if (directAddress.type === 'unknown') {
+        renderer.error(`Unknown model "${directAddress.token}". Use @codex or @<display-name>.`);
+        continue;
+      }
+
+      if (!directAddress.message) {
+        renderer.error(`Usage: @${directAddress.token} <message>`);
+        continue;
+      }
+
+      await runTurn(directAddress.message, directAddress.model);
       continue;
     }
 
@@ -208,12 +241,23 @@ export async function startRepl(params: {
     await runTurn(rawInput);
   }
 
-  cleanup();
+  process.removeListener('SIGINT', onSigint);
   process.stdout.write('\n');
 
-  async function runTurn(message: string): Promise<void> {
+  async function runTurn(message: string, directTarget?: ModelName): Promise<void> {
     history.addUserMessage(message);
     replState = { ...replState, hasHistory: true };
+
+    if (directTarget) {
+      const role = getRoleForModel(directTarget);
+      const client = directTarget === 'codex' ? params.codex : params.opus;
+      const text = await streamModel(directTarget, client, role);
+      if (text !== null) {
+        history.addAssistantMessage(directTarget, text);
+      }
+      renderer.separator();
+      return;
+    }
 
     if (replState.mode === 'codex') {
       const codexText = await streamModel('codex', params.codex, 'freeform');
@@ -258,10 +302,11 @@ export async function startRepl(params: {
 
   async function streamModel(label: 'codex' | 'opus', client: ModelClient, role: ModelRole): Promise<string | null> {
     renderer.print('');
+    replState = { ...replState, isStreaming: true, streamingTarget: label };
+    renderer.print(renderer.renderPrompt(replState));
     renderer.print(renderer.modelHeader(label));
 
     abortController = new AbortController();
-    replState = { ...replState, isStreaming: true };
 
     try {
       const result = await client.streamResponse({
@@ -280,19 +325,54 @@ export async function startRepl(params: {
 
       return result.text.trimEnd();
     } catch (error) {
-      if (error instanceof Error && error.message.startsWith(`${label === 'codex' ? 'Codex' : 'Opus'} error:`)) {
+      const modelLabel = getModelDisplayName(label);
+      if (error instanceof Error && error.message.startsWith(`${modelLabel} error:`)) {
         if (error.message.includes('429')) {
           renderer.error(`${error.message} — retrying in 5s failed`);
         } else {
           renderer.error(error.message);
         }
       } else {
-        renderer.error(`${label === 'codex' ? 'Codex' : 'Opus'} error: ${error instanceof Error ? error.message : String(error)}`);
+        renderer.error(`${modelLabel} error: ${error instanceof Error ? error.message : String(error)}`);
       }
       return null;
     } finally {
       abortController = null;
-      replState = { ...replState, isStreaming: false };
+      replState = { ...replState, isStreaming: false, streamingTarget: null };
     }
   }
+
+  function getRoleForModel(model: ModelName): ModelRole {
+    if (replState.mode !== 'both') {
+      return 'freeform';
+    }
+
+    if (replState.order === 'codex-first') {
+      return model === 'codex' ? 'proposer' : 'critic';
+    }
+
+    return model === 'opus' ? 'proposer' : 'critic';
+  }
+}
+
+function parseDirectAddress(
+  input: string,
+): { type: 'target'; model: ModelName; message: string; token: string } | { type: 'unknown'; token: string } | null {
+  const match = input.match(/^@([^\s]+)\s*(.*)$/i);
+  if (!match) {
+    return null;
+  }
+
+  const [, rawToken, rest] = match;
+  const model = resolveModelAddress(rawToken);
+  if (!model) {
+    return { type: 'unknown', token: rawToken };
+  }
+
+  return {
+    type: 'target',
+    model,
+    message: rest.trim(),
+    token: rawToken,
+  };
 }

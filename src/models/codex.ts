@@ -1,5 +1,6 @@
 import process from 'node:process';
 import OpenAI from 'openai';
+import { CODEX_CONFIG } from '../config.js';
 import { formatEntryForModel } from '../history.js';
 import { buildSystemPrompt, CRITIC_PROMPT, FREEFORM_CODEX_PROMPT, PROPOSER_PROMPT } from '../prompts.js';
 import type { HistoryEntry, ModelClient, ModelRole, StreamResult } from '../types.js';
@@ -111,11 +112,11 @@ export class CodexClient implements ModelClient {
   private readonly initError: string | null;
 
   constructor() {
-    this.model = process.env.CODEX_MODEL ?? 'o3';
+    this.model = CODEX_CONFIG.model;
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       this.client = null;
-      this.initError = 'Codex error: missing OPENAI_API_KEY';
+      this.initError = `${CODEX_CONFIG.displayName} error: missing OPENAI_API_KEY`;
       return;
     }
 
@@ -131,7 +132,7 @@ export class CodexClient implements ModelClient {
     write: (chunk: string) => void;
   }): Promise<StreamResult> {
     if (!this.client) {
-      throw new Error(this.initError ?? 'Codex error: client unavailable');
+      throw new Error(this.initError ?? `${CODEX_CONFIG.displayName} error: client unavailable`);
     }
 
     try {
@@ -170,7 +171,7 @@ export class CodexClient implements ModelClient {
         }
       }
 
-      throw new Error(`Codex error: ${getErrorMessage(error)}`);
+      throw new Error(`${CODEX_CONFIG.displayName} error: ${getErrorMessage(error)}`);
     }
   }
 }

@@ -1,5 +1,6 @@
 import process from 'node:process';
 import Anthropic from '@anthropic-ai/sdk';
+import { OPUS_CONFIG } from '../config.js';
 import { formatEntryForModel } from '../history.js';
 import { buildSystemPrompt, CRITIC_PROMPT, FREEFORM_OPUS_PROMPT, PROPOSER_PROMPT } from '../prompts.js';
 import type { HistoryEntry, ModelClient, ModelRole, StreamResult } from '../types.js';
@@ -32,7 +33,7 @@ function buildOpusMessages(
     const priorUserIndex = [...entries]
       .map((entry, index) => ({ entry, index }))
       .reverse()
-      .find(({ entry }) => entry.role === "user")?.index;
+      .find(({ entry }) => entry.role === 'user')?.index;
 
     const critiquePrompt = `User question: ${
       priorUserIndex !== undefined ? entries[priorUserIndex].content : ''
@@ -45,8 +46,8 @@ function buildOpusMessages(
       };
     } else {
       entries.push({
-        role: "user",
-        author: "you",
+        role: 'user',
+        author: 'you',
         content: critiquePrompt,
         timestamp: new Date().toISOString(),
       });
@@ -81,7 +82,7 @@ async function streamOnce(params: {
 }): Promise<StreamResult> {
   const stream = params.client.messages.stream(
     {
-      model: process.env.ANTHROPIC_MODEL ?? 'claude-opus-4-6',
+      model: OPUS_CONFIG.model,
       max_tokens: 4096,
       system: selectSystemPrompt(params.context, params.role),
       messages: buildOpusMessages(params.history, params.role),
@@ -105,7 +106,7 @@ async function streamOnce(params: {
 }
 
 export class OpusClient implements ModelClient {
-  readonly model = 'claude-opus-4-5';
+  readonly model = OPUS_CONFIG.model;
   private readonly client: Anthropic | null;
   private readonly initError: string | null;
 
@@ -113,7 +114,7 @@ export class OpusClient implements ModelClient {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       this.client = null;
-      this.initError = 'Opus error: missing ANTHROPIC_API_KEY';
+      this.initError = `${OPUS_CONFIG.displayName} error: missing ANTHROPIC_API_KEY`;
       return;
     }
 
@@ -129,7 +130,7 @@ export class OpusClient implements ModelClient {
     write: (chunk: string) => void;
   }): Promise<StreamResult> {
     if (!this.client) {
-      throw new Error(this.initError ?? 'Opus error: client unavailable');
+      throw new Error(this.initError ?? `${OPUS_CONFIG.displayName} error: client unavailable`);
     }
 
     try {
@@ -146,7 +147,7 @@ export class OpusClient implements ModelClient {
         return { text: '', cancelled: true, skipped: false };
       }
 
-      throw new Error(`Opus error: ${getErrorMessage(error)}`);
+      throw new Error(`${OPUS_CONFIG.displayName} error: ${getErrorMessage(error)}`);
     }
   }
 }
