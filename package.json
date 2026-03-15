@@ -3,8 +3,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "build": "tsc -p tsconfig.json",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts"
+  },
+  "bin": {
+    "critique": "dist/index.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "latest",
