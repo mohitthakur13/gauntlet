@@ -1,14 +1,8 @@
 import process from 'node:process';
 import OpenAI from 'openai';
 import { formatEntryForModel } from '../history.js';
-import type { HistoryEntry, ModelClient, StreamResult } from '../types.js';
-
-const SYSTEM_SUFFIX =
-  'You are a senior software engineer. Respond with precise, implementable answers.';
-
-function buildSystemPrompt(context: string): string {
-  return context ? `${context}\n\n${SYSTEM_SUFFIX}` : SYSTEM_SUFFIX;
-}
+import { buildSystemPrompt, CRITIC_PROMPT, FREEFORM_CODEX_PROMPT, PROPOSER_PROMPT } from '../prompts.js';
+import type { HistoryEntry, ModelClient, ModelRole, StreamResult } from '../types.js';
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
@@ -21,7 +15,10 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function buildCodexMessages(history: HistoryEntry[]): Array<{ role: 'user' | 'assistant'; content: string }> {
+function buildCodexMessages(
+  history: HistoryEntry[],
+  role: ModelRole,
+): Array<{ role: 'user' | 'assistant'; content: string }> {
   if (history.length === 0) {
     return [];
   }
@@ -29,7 +26,7 @@ function buildCodexMessages(history: HistoryEntry[]): Array<{ role: 'user' | 'as
   const entries = [...history];
   const lastEntry = entries.at(-1);
 
-  if (lastEntry?.role === 'assistant' && lastEntry.author === 'opus') {
+  if (role === 'critic' && lastEntry?.role === 'assistant' && lastEntry.author === 'opus') {
     entries.pop();
 
     const priorUserIndex = [...entries]
@@ -62,11 +59,24 @@ function buildCodexMessages(history: HistoryEntry[]): Array<{ role: 'user' | 'as
   }));
 }
 
+function selectSystemPrompt(context: string, role: ModelRole): string {
+  if (role === 'proposer') {
+    return buildSystemPrompt(context, PROPOSER_PROMPT);
+  }
+
+  if (role === 'critic') {
+    return buildSystemPrompt(context, CRITIC_PROMPT);
+  }
+
+  return buildSystemPrompt(context, FREEFORM_CODEX_PROMPT);
+}
+
 async function streamOnce(params: {
   client: OpenAI;
   model: string;
   history: HistoryEntry[];
   context: string;
+  role: ModelRole;
   signal: AbortSignal;
   write: (chunk: string) => void;
 }): Promise<StreamResult> {
@@ -75,8 +85,8 @@ async function streamOnce(params: {
       model: params.model,
       stream: true,
       messages: [
-        { role: 'system', content: buildSystemPrompt(params.context) },
-        ...buildCodexMessages(params.history),
+        { role: 'system', content: selectSystemPrompt(params.context, params.role) },
+        ...buildCodexMessages(params.history, params.role),
       ],
     },
     { signal: params.signal },
@@ -116,6 +126,7 @@ export class CodexClient implements ModelClient {
   async streamResponse(input: {
     history: HistoryEntry[];
     context: string;
+    role: ModelRole;
     signal: AbortSignal;
     write: (chunk: string) => void;
   }): Promise<StreamResult> {
@@ -129,6 +140,7 @@ export class CodexClient implements ModelClient {
         model: this.model,
         history: input.history,
         context: input.context,
+        role: input.role,
         signal: input.signal,
         write: input.write,
       });
@@ -146,6 +158,7 @@ export class CodexClient implements ModelClient {
             model: this.model,
             history: input.history,
             context: input.context,
+            role: input.role,
             signal: input.signal,
             write: input.write,
           });

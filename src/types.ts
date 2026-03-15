@@ -11,6 +11,8 @@ export interface ReplState {
 
 export type ModelName = 'codex' | 'opus';
 
+export type ModelRole = 'proposer' | 'critic' | 'freeform';
+
 export type HistoryRole = 'user' | 'assistant';
 
 export interface HistoryEntry {
@@ -41,6 +43,7 @@ export interface ModelClient {
   streamResponse(input: {
     history: HistoryEntry[];
     context: string;
+    role: ModelRole;
     signal: AbortSignal;
     write: (chunk: string) => void;
   }): Promise<StreamResult>;

@@ -4,7 +4,7 @@ import { loadContext } from './context.js';
 import { parseCommand, resolveLoadedInput, saveHistory } from './commands.js';
 import { ConversationHistory } from './history.js';
 import { Renderer } from './renderer.js';
-import type { ContextResolver, ModelClient, ModelName, ReplState } from './types.js';
+import type { ContextResolver, ModelClient, ModelName, ModelRole, ReplState } from './types.js';
 
 type PromptPhase = 'prompt' | 'confirming';
 
@@ -216,7 +216,7 @@ export async function startRepl(params: {
     replState = { ...replState, hasHistory: true };
 
     if (replState.mode === 'codex') {
-      const codexText = await streamModel('codex', params.codex);
+      const codexText = await streamModel('codex', params.codex, 'freeform');
       if (codexText !== null) {
         history.addAssistantMessage('codex', codexText);
       }
@@ -225,7 +225,7 @@ export async function startRepl(params: {
     }
 
     if (replState.mode === 'opus') {
-      const opusText = await streamModel('opus', params.opus);
+      const opusText = await streamModel('opus', params.opus, 'freeform');
       if (opusText !== null) {
         history.addAssistantMessage('opus', opusText);
       }
@@ -233,19 +233,19 @@ export async function startRepl(params: {
       return;
     }
 
-    const sequence: Array<{ label: ModelName; client: ModelClient }> =
+    const sequence: Array<{ label: ModelName; client: ModelClient; role: ModelRole }> =
       replState.order === 'codex-first'
         ? [
-            { label: 'codex', client: params.codex },
-            { label: 'opus', client: params.opus },
+            { label: 'codex', client: params.codex, role: 'proposer' },
+            { label: 'opus', client: params.opus, role: 'critic' },
           ]
         : [
-            { label: 'opus', client: params.opus },
-            { label: 'codex', client: params.codex },
+            { label: 'opus', client: params.opus, role: 'proposer' },
+            { label: 'codex', client: params.codex, role: 'critic' },
           ];
 
     for (const step of sequence) {
-      const text = await streamModel(step.label, step.client);
+      const text = await streamModel(step.label, step.client, step.role);
       if (text === null) {
         renderer.separator();
         return;
@@ -256,7 +256,7 @@ export async function startRepl(params: {
     renderer.separator();
   }
 
-  async function streamModel(label: 'codex' | 'opus', client: ModelClient): Promise<string | null> {
+  async function streamModel(label: 'codex' | 'opus', client: ModelClient, role: ModelRole): Promise<string | null> {
     renderer.print('');
     renderer.print(renderer.modelHeader(label));
 
@@ -267,6 +267,7 @@ export async function startRepl(params: {
       const result = await client.streamResponse({
         history: history.getEntries(),
         context: context.content,
+        role,
         signal: abortController.signal,
         write: (chunk) => renderer.write(chunk),
       });
