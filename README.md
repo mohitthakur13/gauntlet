@@ -1,4 +1,4 @@
-# 🗡️ Gauntlet
+# 🏛️ Gauntlet
 
 **Pit AI models against each other. Bad ideas don't survive.**
 
@@ -30,12 +30,15 @@ and let them argue until one concedes or you call `/verdict`.
 
 ## Quick start
 
+You need at least two models — one to propose, one to critique.
+
 **1. Clone and install**
 
 ```bash
 git clone https://github.com/mohitthakur13/gauntlet
 cd gauntlet
 npm install
+npm run build && npm install -g .
 ```
 
 **2. Add your API keys** — copy `.env.example` to `.env` and fill in:
@@ -63,7 +66,7 @@ The full model definitions are in the same file. See
 **4. Run**
 
 ```bash
-npx tsx src/index.ts
+gauntlet
 ```
 
 That's it. Ask a question, then `/critique` to challenge the
