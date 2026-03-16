@@ -9,6 +9,71 @@ decides what to keep, what to reject, and rewrites the answer.
 Or skip the formality — put two models in a ring with `/debate`
 and let them argue until one concedes or you call `/verdict`.
 
+---
+
+## Table of contents
+
+- [Quick start](#quick-start)
+- [Example session](#example-session)
+- [Debate mode](#debate-mode)
+- [Install](#install)
+- [Configuration](#configuration)
+- [Commands](#commands)
+- [How it works](#how-it-works)
+- [context.md](#contextmd)
+- [Extending Gauntlet](#extending-gauntlet)
+- [Architecture](#architecture)
+- [Tests](#tests)
+- [License](#license)
+
+---
+
+## Quick start
+
+**1. Clone and install**
+
+```bash
+git clone https://github.com/mohitthakur13/gauntlet
+cd gauntlet
+npm install
+```
+
+**2. Add your API keys** — copy `.env.example` to `.env` and fill in:
+
+```env
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+**3. Configure your models** — edit `src/config.json` to set the
+proposer (who answers) and critics (who challenge):
+
+```json
+{
+  "defaults": {
+    "proposerId": "codex",
+    "criticIds": ["opus"]
+  }
+}
+```
+
+The full model definitions are in the same file. See
+[Configuration](#configuration) for details.
+
+**4. Run**
+
+```bash
+npx tsx src/index.ts
+```
+
+That's it. Ask a question, then `/critique` to challenge the
+answer and `/review` to synthesise. Or `/debate aggressive`
+to skip straight to adversarial mode.
+
+---
+
+## Example session
+
 ```
 [codex → opus] › Should we shard the database or use read replicas?
 
