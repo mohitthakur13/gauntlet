@@ -3,7 +3,8 @@
 import dotenv from 'dotenv';
 import { readFile } from 'node:fs/promises';
 import process from 'node:process';
-import { createClients } from './config.js';
+import { createClients, validateStartup } from './config.js';
+import { Renderer } from './renderer.js';
 import { startRepl } from './repl.js';
 
 function parseArgs(argv: string[]): { contextPath?: string } {
@@ -18,6 +19,21 @@ function parseArgs(argv: string[]): { contextPath?: string } {
 
 async function main(): Promise<void> {
   await loadEnvFile();
+
+  const renderer = new Renderer();
+  const diagnostics = validateStartup();
+  for (const warning of diagnostics.warnings) {
+    renderer.warn(warning);
+  }
+
+  if (diagnostics.errors.length > 0) {
+    for (const error of diagnostics.errors) {
+      renderer.error(error);
+    }
+    renderer.print('');
+    renderer.print('Gauntlet cannot start. Fix the errors above and try again.');
+    process.exit(1);
+  }
 
   const args = parseArgs(process.argv.slice(2));
   await startRepl({
