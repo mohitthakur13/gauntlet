@@ -2,7 +2,16 @@ export type ModelId = string;
 
 export type CritiqueMode = 'parallel' | 'sequential';
 
-export type ModelRole = 'proposer' | 'critic' | 'synthesiser' | 'freeform';
+export type DebateStance = 'aggressive' | 'cooperative';
+
+export type DebateExitReason =
+  | 'manual-verdict'
+  | 'converged'
+  | 'max-rounds'
+  | 'debate-off'
+  | 'cancelled';
+
+export type ModelRole = 'proposer' | 'critic' | 'synthesiser' | 'freeform' | 'debater' | 'judge';
 
 export interface ReplState {
   mode: 'multi' | 'single';
@@ -11,6 +20,8 @@ export interface ReplState {
   singleModelId: string | null;
   isStreaming: boolean;
   streamingTarget: string | null;
+  debate: DebateState | null;
+  savedDebates: SavedDebate[];
 }
 
 export type HistoryRole = 'user' | 'assistant';
@@ -30,6 +41,44 @@ export interface Round {
   critiqueMode: CritiqueMode | null;
   criticOrder: string[];
   reviewEntry: HistoryEntry | null;
+}
+
+export interface DebateRound {
+  number: number;
+  firstEntry: HistoryEntry;
+  secondEntry: HistoryEntry;
+  convergenceSignal: boolean;
+  convergenceJudged: boolean;
+}
+
+export interface DebateState {
+  stance: DebateStance;
+  auto: boolean;
+  maxRounds: number;
+  currentRound: number;
+  question: string;
+  humanSteers: string[];
+  converged: boolean;
+  debateRounds: DebateRound[];
+  modelA: string;
+  modelB: string;
+  exitReason: DebateExitReason | null;
+}
+
+export interface SavedDebate {
+  stance: DebateStance;
+  auto: boolean;
+  maxRounds: number;
+  completedRounds: number;
+  question: string;
+  humanSteers: string[];
+  converged: boolean;
+  debateRounds: DebateRound[];
+  modelA: string;
+  modelB: string;
+  exitReason: DebateExitReason;
+  judgeId: string | null;
+  verdictEntry: HistoryEntry | null;
 }
 
 export interface ContextState {
@@ -52,6 +101,11 @@ export interface StreamResult {
   skipped: boolean;
 }
 
+export interface GenerationParams {
+  temperature?: number;
+  presencePenalty?: number;
+}
+
 export interface ModelClient {
   readonly id: ModelId;
   readonly model: string;
@@ -61,6 +115,7 @@ export interface ModelClient {
     context: string;
     role: ModelRole;
     systemPrompt?: string;
+    generationParams?: GenerationParams;
     signal: AbortSignal;
     write: (chunk: string) => void;
   }): Promise<StreamResult>;
@@ -99,5 +154,8 @@ export type CommandResult =
   | { type: 'clear' }
   | { type: 'save'; path?: string }
   | { type: 'context-reload' }
+  | { type: 'debate'; stance: DebateStance; auto: boolean; maxRounds: number }
+  | { type: 'debate-off' }
+  | { type: 'verdict'; judgeId?: string }
   | { type: 'exit' }
   | { type: 'noop' };

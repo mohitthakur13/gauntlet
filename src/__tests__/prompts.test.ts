@@ -2,11 +2,15 @@ import { describe, expect, test } from 'vitest';
 import {
   buildSequentialCriticPrompt,
   buildSystemPrompt,
+  CONVERGENCE_CHECK_PROMPT,
+  COOPERATIVE_DEBATER_PROMPT,
   FREEFORM_PROMPT,
+  AGGRESSIVE_DEBATER_PROMPT,
   PARALLEL_CRITIC_PROMPT,
   PROPOSER_PROMPT,
   SEQUENTIAL_CRITIC_PROMPT,
   SYNTHESISER_PROMPT,
+  VERDICT_PROMPT,
 } from '../prompts.js';
 
 describe('prompt heading contracts', () => {
@@ -39,6 +43,29 @@ describe('prompt heading contracts', () => {
     expect(SYNTHESISER_PROMPT).toContain('## Revised response');
     expect(SYNTHESISER_PROMPT).not.toContain('## First principles');
     expect(SYNTHESISER_PROMPT).not.toContain('## Missed');
+  });
+
+  test('AGGRESSIVE_DEBATER_PROMPT contains required headings', () => {
+    expect(AGGRESSIVE_DEBATER_PROMPT).toContain('## Position');
+    expect(AGGRESSIVE_DEBATER_PROMPT).toContain('## Attack');
+    expect(AGGRESSIVE_DEBATER_PROMPT).toContain('## Concession');
+  });
+
+  test('COOPERATIVE_DEBATER_PROMPT contains required headings', () => {
+    expect(COOPERATIVE_DEBATER_PROMPT).toContain('## Build');
+    expect(COOPERATIVE_DEBATER_PROMPT).toContain('## Challenge');
+    expect(COOPERATIVE_DEBATER_PROMPT).toContain('## Synthesis');
+  });
+
+  test('VERDICT_PROMPT contains required headings', () => {
+    expect(VERDICT_PROMPT).toContain('## Strongest arguments');
+    expect(VERDICT_PROMPT).toContain('## Weaknesses');
+    expect(VERDICT_PROMPT).toContain('## Final answer');
+  });
+
+  test('CONVERGENCE_CHECK_PROMPT contains CONVERGED and DIVERGENT', () => {
+    expect(CONVERGENCE_CHECK_PROMPT).toContain('CONVERGED');
+    expect(CONVERGENCE_CHECK_PROMPT).toContain('DIVERGENT');
   });
 });
 
@@ -90,6 +117,10 @@ describe('spelling consistency', () => {
       SEQUENTIAL_CRITIC_PROMPT,
       SYNTHESISER_PROMPT,
       FREEFORM_PROMPT,
+      AGGRESSIVE_DEBATER_PROMPT,
+      COOPERATIVE_DEBATER_PROMPT,
+      VERDICT_PROMPT,
+      CONVERGENCE_CHECK_PROMPT,
     ];
     for (const prompt of all) {
       expect(prompt).not.toMatch(/synthesizer/i);

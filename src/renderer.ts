@@ -40,6 +40,10 @@ export function renderPrompt(state: ReplState): string {
     return `${color(`[${label}]`, 'dim')} ${color('›', 'white')} `;
   }
 
+  if (state.debate) {
+    return renderDebatePrompt(state);
+  }
+
   if (state.mode === 'single' && state.singleModelId) {
     return `${color(`[${getDisplayName(state.singleModelId)}]`, 'cyan')} ${color('›', 'white')} `;
   }
@@ -70,6 +74,35 @@ export function renderSynthesiserHeader(displayName: string): string {
   const label = `${displayName} (synthesising)`;
   const line = Math.max(1, 40 - label.length);
   return `\n${color(label, 'cyan')} ${color('─'.repeat(line), 'dim')}\n`;
+}
+
+export function renderDebateHeader(
+  displayName: string,
+  round: number,
+  maxRounds: number,
+): string {
+  const roundLabel = maxRounds > 0 ? `round ${round}/${maxRounds}` : `round ${round}`;
+  const label = `${displayName} [${roundLabel}]`;
+  const line = Math.max(1, 40 - label.length);
+  return `\n${color(label, 'cyan')} ${color('─'.repeat(line), 'dim')}\n`;
+}
+
+export function renderVerdictHeader(displayName: string): string {
+  const label = `${displayName} (verdict)`;
+  const line = Math.max(1, 40 - label.length);
+  return `\n${color(label, 'purple')} ${color('─'.repeat(line), 'dim')}\n`;
+}
+
+export function renderDebatePrompt(state: ReplState): string {
+  const debate = state.debate;
+  if (!debate) {
+    return `${color('[debate]', 'purple')} ${color('›', 'white')} `;
+  }
+
+  const label = debate.auto
+    ? `debate:${debate.stance} auto ${debate.currentRound}/${debate.maxRounds}`
+    : `debate:${debate.stance} ${debate.currentRound}`;
+  return `${color(`[${label}]`, 'purple')} ${color('›', 'white')} `;
 }
 
 export class Renderer {
@@ -122,11 +155,27 @@ export class Renderer {
     return renderSynthesiserHeader(displayName);
   }
 
+  renderDebateHeader(displayName: string, round: number, maxRounds: number): string {
+    return renderDebateHeader(displayName, round, maxRounds);
+  }
+
+  renderVerdictHeader(displayName: string): string {
+    return renderVerdictHeader(displayName);
+  }
+
+  renderDebatePrompt(state: ReplState): string {
+    return renderDebatePrompt(state);
+  }
+
   info(message: string): void {
     this.print(this.color(message, 'yellow'));
   }
 
   error(message: string): void {
     this.print(this.color(message, 'red'));
+  }
+
+  warn(message: string): void {
+    this.print(this.color(message, 'yellow'));
   }
 }

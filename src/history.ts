@@ -1,4 +1,4 @@
-import type { CritiqueMode, HistoryEntry, ModelId, ModelRole, Round } from './types.js';
+import type { CritiqueMode, DebateState, HistoryEntry, ModelId, ModelRole, Round } from './types.js';
 
 export class ConversationHistory {
   entries: HistoryEntry[] = [];
@@ -30,6 +30,14 @@ export class ConversationHistory {
     this.entries.push(entry);
     this.dirty = true;
     return entry;
+  }
+
+  removeLastEntry(): HistoryEntry | null {
+    const removed = this.entries.pop() ?? null;
+    if (removed) {
+      this.dirty = true;
+    }
+    return removed;
   }
 
   startRound(question: string, proposerEntry: HistoryEntry): Round {
@@ -168,6 +176,32 @@ export function formatEntryForModel(entry: HistoryEntry): string {
   }
 
   return `[${entry.modelId ?? 'assistant'}]: ${entry.content}`;
+}
+
+export function buildDebateContext(debate: DebateState): string {
+  const parts: string[] = [];
+
+  parts.push('## Original question');
+  parts.push(debate.question);
+  parts.push('');
+
+  for (const round of debate.debateRounds) {
+    parts.push(`### Round ${round.number}`);
+    parts.push(`**${round.firstEntry.modelId ?? 'assistant'}:**`);
+    parts.push(round.firstEntry.content);
+    parts.push('');
+    parts.push(`**${round.secondEntry.modelId ?? 'assistant'}:**`);
+    parts.push(round.secondEntry.content);
+    parts.push('');
+  }
+
+  if (debate.humanSteers.length > 0) {
+    parts.push('### Moderator steering');
+    parts.push(debate.humanSteers[debate.humanSteers.length - 1] ?? '');
+    parts.push('');
+  }
+
+  return parts.join('\n');
 }
 
 export { ConversationHistory as History };

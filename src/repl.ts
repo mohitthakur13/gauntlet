@@ -1,12 +1,37 @@
 import readline, { type Interface as ReadlineInterface } from 'node:readline';
 import process from 'node:process';
 import { buildInitialReplState, getProposerAndCriticIds, MODEL_CONFIGS, resolveModelAddress } from './config.js';
+import { checkConvergence } from './convergence.js';
 import { loadContext, previewContext } from './context.js';
-import { parseCommand, resolveLoadedInput, saveHistory } from './commands.js';
-import { ConversationHistory } from './history.js';
-import { buildSequentialCriticPrompt, buildSystemPrompt, FREEFORM_PROMPT, PARALLEL_CRITIC_PROMPT, PROPOSER_PROMPT, SYNTHESISER_PROMPT } from './prompts.js';
+import { isBlockedDuringDebate, parseCommand, resolveLoadedInput, saveHistory } from './commands.js';
+import { buildDebateContext, ConversationHistory } from './history.js';
+import {
+  AGGRESSIVE_DEBATER_PROMPT,
+  buildSequentialCriticPrompt,
+  buildSystemPrompt,
+  COOPERATIVE_DEBATER_PROMPT,
+  FREEFORM_PROMPT,
+  PARALLEL_CRITIC_PROMPT,
+  PROPOSER_PROMPT,
+  SYNTHESISER_PROMPT,
+  VERDICT_PROMPT,
+} from './prompts.js';
 import { Renderer } from './renderer.js';
-import type { ContextResolver, ContextState, CritiqueMode, HistoryEntry, ModelClient, ModelId, ModelRole, ReplState } from './types.js';
+import type {
+  ContextResolver,
+  ContextState,
+  CritiqueMode,
+  DebateRound,
+  DebateState,
+  DebateStance,
+  GenerationParams,
+  HistoryEntry,
+  ModelClient,
+  ModelId,
+  ModelRole,
+  ReplState,
+  SavedDebate,
+} from './types.js';
 
 type PromptPhase = 'prompt' | 'confirming';
 
@@ -17,10 +42,17 @@ const STREAMING_BLOCKED_COMMANDS = [
   'single',
   'critique',
   'review',
+  'debate',
+  'verdict',
   'clear',
   'context reload',
   ...MODEL_CONFIGS.map((entry) => entry.id),
 ] as const;
+
+const STANCE_PARAMS: Record<DebateStance, GenerationParams> = {
+  aggressive: { temperature: 0.9, presencePenalty: 0.3 },
+  cooperative: { temperature: 0.6, presencePenalty: 0.0 },
+};
 
 function question(
   rl: ReadlineInterface,
@@ -238,6 +270,25 @@ export async function startRepl(params: {
       continue;
     }
 
+    if (replState.debate !== null) {
+      if (input.startsWith('@')) {
+        renderer.warn(
+          'Direct address is blocked during debate. Type your message as free text — it will be used as moderator steering for the next exchange.',
+        );
+        continue;
+      }
+
+      if (isBlockedDuringDebate(input)) {
+        renderer.warn('Not available during debate. Use /verdict to end or /debate off to exit.');
+        continue;
+      }
+
+      if (!input.startsWith('/')) {
+        await runDebateTurn(input, replState.debate.question === '');
+        continue;
+      }
+    }
+
     const directAddress = parseDirectAddress(input);
     if (directAddress) {
       if (directAddress.type === 'unknown') {
@@ -295,6 +346,56 @@ export async function startRepl(params: {
 
       if (command.type === 'review') {
         await runReview(command.modelId);
+        continue;
+      }
+
+      if (command.type === 'debate') {
+        const modelA = replState.proposerId;
+        const modelB = replState.criticIds[0];
+        if (!modelB) {
+          renderer.error('Debate requires at least one critic. Use /critics to set one.');
+          continue;
+        }
+
+        replState = {
+          ...replState,
+          debate: {
+            stance: command.stance,
+            auto: command.auto,
+            maxRounds: command.maxRounds,
+            currentRound: 0,
+            question: '',
+            humanSteers: [],
+            converged: false,
+            debateRounds: [],
+            modelA,
+            modelB,
+            exitReason: null,
+          },
+        };
+        renderer.info(`Debate mode active (${command.stance}). Enter your question.`);
+        continue;
+      }
+
+      if (command.type === 'debate-off') {
+        const debate = replState.debate;
+        if (!debate) {
+          renderer.info('No active debate.');
+          continue;
+        }
+
+        const snapshot = snapshotDebateForSave({ ...debate, exitReason: 'debate-off' }, null, null);
+        replState = {
+          ...replState,
+          debate: null,
+          savedDebates: [...replState.savedDebates, snapshot],
+        };
+        renderer.info('Debate mode exited.');
+        continue;
+      }
+
+      if (command.type === 'verdict') {
+        await runVerdict(command.judgeId);
         continue;
       }
 
@@ -521,6 +622,236 @@ export async function startRepl(params: {
     renderer.separator();
   }
 
+  function buildDebateSystemPrompt(stance: DebateStance): string {
+    const debatePrompt = stance === 'aggressive'
+      ? AGGRESSIVE_DEBATER_PROMPT
+      : COOPERATIVE_DEBATER_PROMPT;
+    return buildSystemPrompt(context.content, debatePrompt);
+  }
+
+  function buildDebateStreamHistory(firstEntry?: HistoryEntry): HistoryEntry[] {
+    const debate = replState.debate;
+    if (!debate) {
+      return [];
+    }
+
+    let contextText = buildDebateContext(debate);
+
+    if (firstEntry) {
+      const modelName = firstEntry.modelId ?? 'opponent';
+      contextText += `\n### Current round — ${modelName}\n${firstEntry.content}\n`;
+    }
+
+    return [{ role: 'user', content: contextText }];
+  }
+
+  function selectJudgeId(debate: DebateState): string {
+    for (const entry of MODEL_CONFIGS) {
+      if (entry.id !== debate.modelA && entry.id !== debate.modelB) {
+        return entry.id;
+      }
+    }
+    return debate.modelA;
+  }
+
+  function selectJudgeClient(debate: DebateState): ModelClient {
+    const judgeId = selectJudgeId(debate);
+    const judgeClient = params.clients.get(judgeId);
+    if (!judgeClient) {
+      throw new Error(`Unknown model "${judgeId}".`);
+    }
+    return judgeClient;
+  }
+
+  function snapshotDebateForSave(
+    debate: DebateState,
+    judgeId: string | null,
+    verdictEntry: HistoryEntry | null,
+  ): SavedDebate {
+    return {
+      stance: debate.stance,
+      auto: debate.auto,
+      maxRounds: debate.maxRounds,
+      completedRounds: debate.debateRounds.length,
+      question: debate.question,
+      humanSteers: [...debate.humanSteers],
+      converged: debate.converged,
+      debateRounds: [...debate.debateRounds],
+      modelA: debate.modelA,
+      modelB: debate.modelB,
+      exitReason: debate.exitReason ?? 'cancelled',
+      judgeId,
+      verdictEntry,
+    };
+  }
+
+  async function runVerdict(judgeIdOverride?: string): Promise<void> {
+    const debate = replState.debate;
+    if (!debate) {
+      renderer.info('No active debate.');
+      return;
+    }
+
+    const judgeId = judgeIdOverride ?? selectJudgeId(debate);
+    const judgeClient = params.clients.get(judgeId);
+    if (!judgeClient) {
+      renderer.error(`Unknown model "${judgeId}".`);
+      return;
+    }
+
+    const isDebater = judgeId === debate.modelA || judgeId === debate.modelB;
+    if (isDebater && !judgeIdOverride) {
+      renderer.warn(
+        `Using ${judgeId} as judge — it is also a debater. Verdict neutrality may be weaker. Add a third model for unbiased judging, or use /verdict <id> to choose.`,
+      );
+    }
+
+    const verdictText = await streamModel({
+      client: judgeClient,
+      role: 'judge',
+      streamHistory: [{ role: 'user', content: buildDebateContext(debate) }],
+      header: renderer.renderVerdictHeader(judgeClient.displayName),
+      streamingTarget: `${judgeClient.displayName} (verdict)`,
+      systemPrompt: buildSystemPrompt(context.content, VERDICT_PROMPT),
+    });
+
+    if (verdictText === null) {
+      return;
+    }
+
+    const verdictEntry = history.addAssistantMessage(judgeId, verdictText, 'judge');
+    const exitReason = debate.exitReason ?? 'manual-verdict';
+    const snapshot = snapshotDebateForSave({ ...debate, exitReason }, judgeId, verdictEntry);
+    replState = {
+      ...replState,
+      debate: null,
+      savedDebates: [...replState.savedDebates, snapshot],
+    };
+    renderer.separator();
+  }
+
+  async function runDebateTurn(message: string, isFirstTurn: boolean): Promise<void> {
+    const debate = replState.debate;
+    if (!debate) {
+      return;
+    }
+
+    if (isFirstTurn) {
+      debate.question = message;
+      history.addUserMessage(message);
+    } else if (message) {
+      debate.humanSteers.push(message);
+      history.addUserMessage(message);
+    }
+
+    debate.currentRound += 1;
+
+    const isOddRound = debate.currentRound % 2 === 1;
+    const firstModelId = isOddRound ? debate.modelA : debate.modelB;
+    const secondModelId = isOddRound ? debate.modelB : debate.modelA;
+    const firstClient = params.clients.get(firstModelId);
+    const secondClient = params.clients.get(secondModelId);
+
+    if (!firstClient || !secondClient) {
+      renderer.error('Debate model configuration is invalid.');
+      debate.currentRound -= 1;
+      return;
+    }
+
+    const firstText = await streamModel({
+      client: firstClient,
+      role: 'debater',
+      streamHistory: buildDebateStreamHistory(),
+      header: renderer.renderDebateHeader(firstClient.displayName, debate.currentRound, debate.maxRounds),
+      streamingTarget: firstClient.displayName,
+      systemPrompt: buildDebateSystemPrompt(debate.stance),
+      generationParams: STANCE_PARAMS[debate.stance],
+    });
+
+    if (firstText === null) {
+      debate.currentRound -= 1;
+      return;
+    }
+
+    const firstEntry = history.addAssistantMessage(firstModelId, firstText, 'debater');
+
+    const secondText = await streamModel({
+      client: secondClient,
+      role: 'debater',
+      streamHistory: buildDebateStreamHistory(firstEntry),
+      header: renderer.renderDebateHeader(secondClient.displayName, debate.currentRound, debate.maxRounds),
+      streamingTarget: secondClient.displayName,
+      systemPrompt: buildDebateSystemPrompt(debate.stance),
+      generationParams: STANCE_PARAMS[debate.stance],
+    });
+
+    if (secondText === null) {
+      history.removeLastEntry();
+      debate.currentRound -= 1;
+      return;
+    }
+
+    const secondEntry = history.addAssistantMessage(secondModelId, secondText, 'debater');
+    const debateRound: DebateRound = {
+      number: debate.currentRound,
+      firstEntry,
+      secondEntry,
+      convergenceSignal: false,
+      convergenceJudged: false,
+    };
+
+    if (debate.auto) {
+      const judgeClient = selectJudgeClient(debate);
+      replState = { ...replState, isStreaming: true, streamingTarget: `${judgeClient.displayName} (judge)` };
+      abortController = new AbortController();
+      let result;
+      try {
+        result = await checkConvergence(
+          firstEntry,
+          secondEntry,
+          debate,
+          judgeClient,
+          abortController.signal,
+        );
+      } catch (error) {
+        renderer.warn(
+          `Convergence check failed: ${error instanceof Error ? error.message : String(error)}. Continuing debate.`,
+        );
+        debate.debateRounds.push(debateRound);
+        await runDebateTurn('', false);
+        return;
+      } finally {
+        abortController = null;
+        replState = { ...replState, isStreaming: false, streamingTarget: null };
+      }
+
+      debateRound.convergenceSignal = result.signals.length > 0;
+      debateRound.convergenceJudged = result.method === 'judge';
+      debate.debateRounds.push(debateRound);
+
+      if (result.shouldStop) {
+        renderer.info(`Convergence detected (${result.method}: ${result.signals.join(', ') || 'judge'})`);
+        debate.converged = true;
+        debate.exitReason = 'converged';
+        await runVerdict();
+        return;
+      }
+
+      if (debate.currentRound >= debate.maxRounds) {
+        renderer.info(`Max rounds (${debate.maxRounds}) reached.`);
+        debate.exitReason = 'max-rounds';
+        await runVerdict();
+        return;
+      }
+
+      await runDebateTurn('', false);
+      return;
+    }
+
+    debate.debateRounds.push(debateRound);
+    renderer.separator();
+  }
+
   async function streamModel(paramsForStream: {
     client: ModelClient;
     role: ModelRole;
@@ -528,6 +859,7 @@ export async function startRepl(params: {
     header: string;
     streamingTarget: string;
     systemPrompt?: string;
+    generationParams?: GenerationParams;
   }): Promise<string | null> {
     renderer.print('');
     replState = { ...replState, isStreaming: true, streamingTarget: paramsForStream.streamingTarget };
@@ -542,6 +874,7 @@ export async function startRepl(params: {
         context: context.content,
         role: paramsForStream.role,
         systemPrompt: paramsForStream.systemPrompt,
+        generationParams: paramsForStream.generationParams,
         signal: abortController.signal,
         write: (chunk) => renderer.write(chunk),
       });

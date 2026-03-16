@@ -126,5 +126,7 @@ export function buildInitialReplState(): ReplState {
     singleModelId: null,
     isStreaming: false,
     streamingTarget: null,
+    debate: null,
+    savedDebates: [],
   };
 }

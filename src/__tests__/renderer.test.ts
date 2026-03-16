@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'vitest';
-import { renderCriticHeader, renderPrompt, renderSynthesiserHeader } from '../renderer.js';
+import {
+  renderCriticHeader,
+  renderDebateHeader,
+  renderDebatePrompt,
+  renderPrompt,
+  renderSynthesiserHeader,
+  renderVerdictHeader,
+} from '../renderer.js';
 import type { ReplState } from '../types.js';
 
 function stripAnsi(str: string): string {
@@ -14,6 +21,8 @@ function makeMultiState(proposerId: string, criticIds: string[]): ReplState {
     singleModelId: null,
     isStreaming: false,
     streamingTarget: null,
+    debate: null,
+    savedDebates: [],
   };
 }
 
@@ -25,6 +34,8 @@ function makeSingleState(modelId: string): ReplState {
     singleModelId: modelId,
     isStreaming: false,
     streamingTarget: null,
+    debate: null,
+    savedDebates: [],
   };
 }
 
@@ -96,5 +107,65 @@ describe('renderCriticHeader and renderSynthesiserHeader', () => {
     const result = stripAnsi(renderSynthesiserHeader('codex'));
     expect(result).toContain('codex');
     expect(result).toContain('synthesising');
+  });
+});
+
+describe('debate renderers', () => {
+  test('renderDebateHeader with maxRounds > 0 shows round N/M', () => {
+    const result = stripAnsi(renderDebateHeader('codex', 2, 5));
+    expect(result).toContain('codex');
+    expect(result).toContain('round 2/5');
+  });
+
+  test('renderDebateHeader with maxRounds === 0 shows round N', () => {
+    const result = stripAnsi(renderDebateHeader('codex', 2, 0));
+    expect(result).toContain('round 2');
+    expect(result).not.toContain('2/0');
+  });
+
+  test('renderVerdictHeader shows verdict label', () => {
+    const result = stripAnsi(renderVerdictHeader('opus'));
+    expect(result).toContain('opus');
+    expect(result).toContain('verdict');
+  });
+
+  test('renderDebatePrompt manual mode', () => {
+    const result = stripAnsi(renderDebatePrompt({
+      ...makeMultiState('codex', ['opus']),
+      debate: {
+        stance: 'aggressive',
+        auto: false,
+        maxRounds: 0,
+        currentRound: 2,
+        question: 'q',
+        humanSteers: [],
+        converged: false,
+        debateRounds: [],
+        modelA: 'codex',
+        modelB: 'opus',
+        exitReason: null,
+      },
+    }));
+    expect(result).toContain('debate:aggressive 2');
+  });
+
+  test('renderDebatePrompt auto mode shows auto N/M', () => {
+    const result = stripAnsi(renderPrompt({
+      ...makeMultiState('codex', ['opus']),
+      debate: {
+        stance: 'cooperative',
+        auto: true,
+        maxRounds: 5,
+        currentRound: 3,
+        question: 'q',
+        humanSteers: [],
+        converged: false,
+        debateRounds: [],
+        modelA: 'codex',
+        modelB: 'opus',
+        exitReason: null,
+      },
+    }));
+    expect(result).toContain('debate:cooperative auto 3/5');
   });
 });

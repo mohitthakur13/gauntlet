@@ -3,7 +3,7 @@ import path from 'node:path';
 import { getModelConfig, getModelDisplayName } from './config.js';
 import { previewContext } from './context.js';
 import { ConversationHistory } from './history.js';
-import type { CommandContext, CommandResult, ContextState, CritiqueMode, ModelDefinition, ModelId, ReplState, Round } from './types.js';
+import type { CommandContext, CommandResult, ContextState, CritiqueMode, ModelDefinition, ModelId, ReplState, Round, SavedDebate } from './types.js';
 
 function findModelId(token: string, models: ModelDefinition[]): ModelId | null {
   const normalized = token.trim().toLowerCase();
@@ -78,6 +78,43 @@ function parseCritiqueArgs(
 
 function formatCritics(criticIds: ModelId[]): string {
   return `Critics: ${criticIds.map((id) => getModelDisplayName(id)).join(', ')}`;
+}
+
+export function getDebateUsage(replState: ReplState): string {
+  if (replState.debate) {
+    const debate = replState.debate;
+    const mode = debate.auto ? `auto ${debate.maxRounds}` : 'manual';
+    const question = debate.question || 'awaiting question';
+    return [
+      `Debate active: ${debate.stance} (${mode})`,
+      `Round: ${debate.currentRound}`,
+      `Debaters: ${debate.modelA} vs ${debate.modelB}`,
+      `Question: ${question}`,
+    ].join('\n');
+  }
+
+  return 'Usage: /debate aggressive|cooperative [auto <n>]';
+}
+
+export function isBlockedDuringDebate(input: string): boolean {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith('/')) {
+    return false;
+  }
+
+  const [command, ...rest] = trimmed.split(/\s+/);
+  if (command === '/debate' && rest[0] === 'off') {
+    return false;
+  }
+
+  return ![
+    '/debate',
+    '/verdict',
+    '/help',
+    '/models',
+    '/context',
+    '/save',
+  ].includes(command);
 }
 
 export function parseCommand(input: string, context: CommandContext): CommandResult {
@@ -188,6 +225,79 @@ export function parseCommand(input: string, context: CommandContext): CommandRes
         return { type: 'context-reload' };
       }
       return { type: 'info', message: previewContext(context.context) };
+    case '/debate':
+      if (rest.length === 0) {
+        return { type: 'info', message: getDebateUsage(context.repl) };
+      }
+
+      if (context.repl.debate && rest[0] !== 'off') {
+        return { type: 'info', message: 'Debate already active. Use /debate off to exit first.' };
+      }
+
+      if (rest[0] === 'off') {
+        if (!context.repl.debate) {
+          return { type: 'info', message: 'No active debate.' };
+        }
+        if (rest.length > 1) {
+          return { type: 'info', message: 'Usage: /debate off' };
+        }
+        return { type: 'debate-off' };
+      }
+
+      if (context.repl.criticIds.length === 0) {
+        return { type: 'info', message: 'Debate requires at least one critic. Use /critics to set one.' };
+      }
+
+      const stance = rest[0];
+      if (stance !== 'aggressive' && stance !== 'cooperative') {
+        return {
+          type: 'info',
+          message: 'Usage: /debate aggressive|cooperative [auto <n>]',
+        };
+      }
+
+      if (rest[1] === 'auto') {
+        const n = Number.parseInt(rest[2] ?? '', 10);
+        if (Number.isNaN(n) || n < 1) {
+          return {
+            type: 'info',
+            message: 'Max rounds must be >= 1',
+          };
+        }
+        if (rest.length !== 3) {
+          return {
+            type: 'info',
+            message: 'Usage: /debate aggressive|cooperative [auto <n>]',
+          };
+        }
+        return { type: 'debate', stance, auto: true, maxRounds: n };
+      }
+
+      if (rest.length > 1) {
+        return {
+          type: 'info',
+          message: 'Usage: /debate aggressive|cooperative [auto <n>]',
+        };
+      }
+
+      return { type: 'debate', stance, auto: false, maxRounds: 0 };
+    case '/verdict': {
+      if (!context.repl.debate) {
+        return { type: 'info', message: 'No active debate.' };
+      }
+
+      const judgeId = rest[0];
+      if (judgeId && !context.models.some((model) => model.id === judgeId)) {
+        return {
+          type: 'info',
+          message: `Unknown model: ${judgeId}. Use /models to see available.`,
+        };
+      }
+      if (rest.length > 1) {
+        return { type: 'info', message: 'Usage: /verdict [id]' };
+      }
+      return { type: 'verdict', judgeId };
+    }
     case '/clear':
       return { type: 'clear' };
     case '/save':
@@ -214,6 +324,12 @@ export function parseCommand(input: string, context: CommandContext): CommandRes
           '  /critique sequential             Sequential (default order)',
           '  /critique sequential <id> [id…]  Sequential (custom order)',
           '  /review [id]                     Synthesise all critiques',
+          '',
+          'Debate',
+          '  /debate aggressive|cooperative   Start manual debate',
+          '  /debate <stance> auto <n>        Start auto debate',
+          '  /verdict [id]                    End debate with verdict',
+          '  /debate off                      Exit debate without verdict',
           '',
           'Modes',
           '  /both                            Multi mode',
@@ -297,6 +413,45 @@ function renderRound(round: Round): string {
   return parts.join('\n');
 }
 
+function renderDebate(savedDebate: SavedDebate): string {
+  const parts: string[] = [
+    `## Debate — ${savedDebate.stance}`,
+    '',
+    `**Debaters:** ${savedDebate.modelA} vs ${savedDebate.modelB}`,
+    `**Mode:** ${savedDebate.auto ? 'auto' : 'manual'}`,
+    `**Max rounds:** ${savedDebate.maxRounds > 0 ? savedDebate.maxRounds : '—'}`,
+    `**Completed rounds:** ${savedDebate.completedRounds}`,
+    `**Exit reason:** ${savedDebate.exitReason}`,
+    `**Judge:** ${savedDebate.judgeId ?? '—'}`,
+    '',
+    `**Question:** ${savedDebate.question}`,
+  ];
+
+  for (let index = 0; index < savedDebate.debateRounds.length; index += 1) {
+    const round = savedDebate.debateRounds[index];
+    const steer = savedDebate.humanSteers[index - 1];
+    parts.push('');
+    parts.push(`### Round ${round.number} — ${round.firstEntry.modelId ?? 'assistant'}`);
+    parts.push(round.firstEntry.content);
+    parts.push('');
+    parts.push(`### Round ${round.number} — ${round.secondEntry.modelId ?? 'assistant'}`);
+    parts.push(round.secondEntry.content);
+    if (steer) {
+      parts.push('');
+      parts.push('### Moderator steering');
+      parts.push(steer);
+    }
+  }
+
+  if (savedDebate.verdictEntry) {
+    parts.push('');
+    parts.push(`### Verdict — ${savedDebate.verdictEntry.modelId ?? savedDebate.judgeId ?? 'assistant'}`);
+    parts.push(savedDebate.verdictEntry.content);
+  }
+
+  return parts.join('\n');
+}
+
 export function formatSaveOutput(
   history: ConversationHistory,
   replState: ReplState,
@@ -313,6 +468,7 @@ export function formatSaveOutput(
   const critics = replState.criticIds.map((criticId) => getModelConfig(criticId));
   const rounds = history.getRounds();
   return [
+    ...[
     '# Gauntlet Session',
     `Date: ${new Date().toISOString()}`,
     `Proposer: ${proposer.displayName} (${proposer.model})`,
@@ -326,7 +482,21 @@ export function formatSaveOutput(
         ? [renderRound(round)]
         : [renderRound(round), '', '---', '']
     )),
-  ].join('\n');
+    ],
+    ...contextualDebates(replState.savedDebates),
+  ].flat().join('\n');
+}
+
+function contextualDebates(savedDebates: SavedDebate[]): string[] {
+  if (savedDebates.length === 0) {
+    return [];
+  }
+
+  return savedDebates.flatMap((savedDebate, index) => (
+    index === 0
+      ? ['', '---', '', renderDebate(savedDebate)]
+      : ['', '---', '', renderDebate(savedDebate)]
+  ));
 }
 
 export async function saveHistory(

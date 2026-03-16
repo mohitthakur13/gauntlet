@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { formatEntryForModel } from '../history.js';
 import { buildSystemPrompt, FREEFORM_PROMPT, PARALLEL_CRITIC_PROMPT, PROPOSER_PROMPT, SYNTHESISER_PROMPT } from '../prompts.js';
-import type { HistoryEntry, ModelClient, ModelRole, StreamResult } from '../types.js';
+import type { GenerationParams, HistoryEntry, ModelClient, ModelRole, StreamResult } from '../types.js';
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
@@ -46,6 +46,7 @@ async function streamOnce(params: {
   context: string;
   role: ModelRole;
   systemPrompt?: string;
+  generationParams?: GenerationParams;
   signal: AbortSignal;
   write: (chunk: string) => void;
 }): Promise<StreamResult> {
@@ -55,6 +56,7 @@ async function streamOnce(params: {
       max_tokens: 4096,
       system: params.systemPrompt ?? selectSystemPrompt(params.context, params.role),
       messages: buildOpusMessages(params.history),
+      temperature: params.generationParams?.temperature,
     },
     { signal: params.signal },
   );
@@ -100,6 +102,7 @@ export class OpusClient implements ModelClient {
     context: string;
     role: ModelRole;
     systemPrompt?: string;
+    generationParams?: GenerationParams;
     signal: AbortSignal;
     write: (chunk: string) => void;
   }): Promise<StreamResult> {
@@ -115,6 +118,7 @@ export class OpusClient implements ModelClient {
         context: input.context,
         role: input.role,
         systemPrompt: input.systemPrompt,
+        generationParams: input.generationParams,
         signal: input.signal,
         write: input.write,
       });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { formatEntryForModel, History } from '../history.js';
+import { buildDebateContext, formatEntryForModel, History } from '../history.js';
 import type { HistoryEntry } from '../types.js';
 
 function makeProposerEntry(content = 'proposal'): HistoryEntry {
@@ -225,5 +225,51 @@ describe('formatEntryForModel', () => {
     const result = formatEntryForModel(entry);
     expect(result).toContain('[codex]');
     expect(result).toContain('response');
+  });
+});
+
+describe('debate helpers', () => {
+  test('removeLastEntry removes the latest flat entry', () => {
+    const h = new History();
+    h.addUserMessage('q');
+    h.addAssistantMessage('codex', 'a');
+    const removed = h.removeLastEntry();
+    expect(removed?.content).toBe('a');
+    expect(h.getEntries()).toHaveLength(1);
+  });
+
+  test('buildDebateContext includes question, transcript, and latest steering only', () => {
+    const firstEntry = makeCritiqueEntry('codex', 'first');
+    firstEntry.entryRole = 'debater';
+    const secondEntry = makeCritiqueEntry('opus', 'second');
+    secondEntry.entryRole = 'debater';
+    const context = buildDebateContext({
+      stance: 'aggressive',
+      auto: false,
+      maxRounds: 0,
+      currentRound: 2,
+      question: 'original question',
+      humanSteers: ['earlier steer', 'latest steer'],
+      converged: false,
+      debateRounds: [
+        {
+          number: 1,
+          firstEntry,
+          secondEntry,
+          convergenceSignal: false,
+          convergenceJudged: false,
+        },
+      ],
+      modelA: 'codex',
+      modelB: 'opus',
+      exitReason: null,
+    });
+    expect(context).toContain('## Original question');
+    expect(context).toContain('original question');
+    expect(context).toContain('### Round 1');
+    expect(context).toContain('first');
+    expect(context).toContain('second');
+    expect(context).toContain('latest steer');
+    expect(context).not.toContain('earlier steer');
   });
 });

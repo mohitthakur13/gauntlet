@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import { formatEntryForModel } from '../history.js';
 import { buildSystemPrompt, FREEFORM_PROMPT, PARALLEL_CRITIC_PROMPT, PROPOSER_PROMPT, SYNTHESISER_PROMPT } from '../prompts.js';
-import type { HistoryEntry, ModelClient, ModelRole, StreamResult } from '../types.js';
+import type { GenerationParams, HistoryEntry, ModelClient, ModelRole, StreamResult } from '../types.js';
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
@@ -46,6 +46,7 @@ async function streamOnce(params: {
   context: string;
   role: ModelRole;
   systemPrompt?: string;
+  generationParams?: GenerationParams;
   signal: AbortSignal;
   write: (chunk: string) => void;
 }): Promise<StreamResult> {
@@ -57,6 +58,8 @@ async function streamOnce(params: {
         { role: 'system', content: params.systemPrompt ?? selectSystemPrompt(params.context, params.role) },
         ...buildCodexMessages(params.history),
       ],
+      temperature: params.generationParams?.temperature,
+      presence_penalty: params.generationParams?.presencePenalty,
     },
     { signal: params.signal },
   );
@@ -100,6 +103,7 @@ export class CodexClient implements ModelClient {
     context: string;
     role: ModelRole;
     systemPrompt?: string;
+    generationParams?: GenerationParams;
     signal: AbortSignal;
     write: (chunk: string) => void;
   }): Promise<StreamResult> {
@@ -115,6 +119,7 @@ export class CodexClient implements ModelClient {
         context: input.context,
         role: input.role,
         systemPrompt: input.systemPrompt,
+        generationParams: input.generationParams,
         signal: input.signal,
         write: input.write,
       });
@@ -134,6 +139,7 @@ export class CodexClient implements ModelClient {
             context: input.context,
             role: input.role,
             systemPrompt: input.systemPrompt,
+            generationParams: input.generationParams,
             signal: input.signal,
             write: input.write,
           });
