@@ -1,14 +1,26 @@
 import readline, { type Interface as ReadlineInterface } from 'node:readline';
 import process from 'node:process';
-import { buildInitialReplState, getModelDisplayName, getProposerAndCriticIds, MODEL_CONFIGS, resolveModelAddress } from './config.js';
+import { buildInitialReplState, getProposerAndCriticIds, MODEL_CONFIGS, resolveModelAddress } from './config.js';
 import { loadContext, previewContext } from './context.js';
 import { parseCommand, resolveLoadedInput, saveHistory } from './commands.js';
 import { ConversationHistory } from './history.js';
 import { buildSequentialCriticPrompt, buildSystemPrompt, FREEFORM_PROMPT, PARALLEL_CRITIC_PROMPT, PROPOSER_PROMPT, SYNTHESISER_PROMPT } from './prompts.js';
 import { Renderer } from './renderer.js';
-import type { ContextResolver, ContextState, CritiqueMode, HistoryEntry, ModelClient, ModelId, ModelRole, ReplState, Round } from './types.js';
+import type { ContextResolver, ContextState, CritiqueMode, HistoryEntry, ModelClient, ModelId, ModelRole, ReplState } from './types.js';
 
 type PromptPhase = 'prompt' | 'confirming';
+
+const STREAMING_BLOCKED_COMMANDS = [
+  'propose',
+  'critics',
+  'both',
+  'single',
+  'critique',
+  'review',
+  'clear',
+  'context reload',
+  ...MODEL_CONFIGS.map((entry) => entry.id),
+] as const;
 
 function question(
   rl: ReadlineInterface,
@@ -42,6 +54,42 @@ function buildSyntheticUserHistory(history: HistoryEntry[], content: string): Hi
 
 function previewContextForReload(context: ContextState): string {
   return previewContext(context);
+}
+
+function getSlashCommandKey(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith('/')) {
+    return null;
+  }
+
+  const parts = trimmed.slice(1).split(/\s+/).filter(Boolean);
+  if (parts.length === 0) {
+    return null;
+  }
+
+  if (parts[0] === 'context' && parts[1] === 'reload') {
+    return 'context reload';
+  }
+
+  return parts[0];
+}
+
+function isSlashCommand(input: string): boolean {
+  return input.trim().startsWith('/');
+}
+
+function isDirectAddressInput(input: string): boolean {
+  return /^@/.test(input.trim());
+}
+
+function isReadOnlyCommand(input: string): boolean {
+  const key = getSlashCommandKey(input);
+  return key === 'help' || key === 'models' || key === 'context';
+}
+
+function isMutatingCommand(input: string): boolean {
+  const key = getSlashCommandKey(input);
+  return key !== null && STREAMING_BLOCKED_COMMANDS.includes(key as (typeof STREAMING_BLOCKED_COMMANDS)[number]);
 }
 
 export async function startRepl(params: {
@@ -160,6 +208,36 @@ export async function startRepl(params: {
       continue;
     }
 
+    if (replState.isStreaming) {
+      if (isReadOnlyCommand(input)) {
+        const readOnlyCommand = parseCommand(input, {
+          cwd: params.cwd,
+          repl: replState,
+          context,
+          historyLength: history.count(),
+          models: MODEL_CONFIGS,
+          defaults: getProposerAndCriticIds(),
+        });
+        if (readOnlyCommand.type === 'info') {
+          renderer.info(readOnlyCommand.message);
+        }
+        continue;
+      }
+
+      if (isDirectAddressInput(input)) {
+        renderer.error('Cannot send messages while streaming.\nPress ctrl+c to cancel, then try again.');
+      } else if (isSlashCommand(input)) {
+        if (!isMutatingCommand(input)) {
+          renderer.error('Cannot change configuration while streaming.\nPress ctrl+c to cancel, then try again.');
+          continue;
+        }
+        renderer.error('Cannot change configuration while streaming.\nPress ctrl+c to cancel, then try again.');
+      } else {
+        renderer.error('Cannot send messages while streaming.\nPress ctrl+c to cancel, then try again.');
+      }
+      continue;
+    }
+
     const directAddress = parseDirectAddress(input);
     if (directAddress) {
       if (directAddress.type === 'unknown') {
@@ -232,10 +310,11 @@ export async function startRepl(params: {
       }
 
       if (command.type === 'clear') {
-        const answer = await confirm('Clear history? [y/n] ');
+        const answer = await confirm('Clear session? [y/n] ');
         if (answer.toLowerCase() === 'y') {
           history.clear();
-          renderer.info('History cleared.');
+          replState = { ...replState, isStreaming: false, streamingTarget: null };
+          renderer.info('Session cleared.');
         }
         continue;
       }
@@ -336,16 +415,16 @@ export async function startRepl(params: {
       return;
     }
 
-    const role = getRoleForModel(modelId);
     const text = await streamModel({
       client,
-      role,
+      role: 'freeform',
       streamHistory: history.getEntries(),
       header: renderer.renderModelHeader(client.displayName),
       streamingTarget: client.displayName,
+      systemPrompt: buildSystemPrompt(context.content, FREEFORM_PROMPT),
     });
     if (text !== null) {
-      history.addAssistantMessage(modelId, text, role);
+      history.addAssistantMessage(modelId, text, 'freeform');
     }
     renderer.separator();
   }
@@ -376,7 +455,7 @@ export async function startRepl(params: {
       const criticContext = mode === 'parallel'
         ? history.buildParallelCriticContext(round, round.question)
         : history.buildSequentialCriticContext(round, round.question, index, criticIds.length);
-      const criticHistory = buildSyntheticUserHistory(history.getEntries(), criticContext);
+      const criticHistory = buildSyntheticUserHistory([], criticContext);
       const critiqueText = await streamModel({
         client: criticClient,
         role: 'critic',
@@ -423,7 +502,7 @@ export async function startRepl(params: {
     }
 
     const reviewContext = history.buildSynthesiserContext(round, round.question);
-    const reviewHistory = buildSyntheticUserHistory(history.getEntries(), reviewContext);
+    const reviewHistory = buildSyntheticUserHistory([], reviewContext);
     const reviewText = await streamModel({
       client: synthesiserClient,
       role: 'synthesiser',
@@ -491,22 +570,6 @@ export async function startRepl(params: {
       abortController = null;
       replState = { ...replState, isStreaming: false, streamingTarget: null };
     }
-  }
-
-  function getRoleForModel(modelId: ModelId): ModelRole {
-    if (replState.mode !== 'multi') {
-      return 'freeform';
-    }
-
-    if (modelId === replState.proposerId) {
-      return 'proposer';
-    }
-
-    if (replState.criticIds.includes(modelId)) {
-      return 'critic';
-    }
-
-    return 'freeform';
   }
 }
 

@@ -29,6 +29,53 @@ function parseModelIds(tokens: string[], models: ModelDefinition[]): ModelId[] |
   return ids;
 }
 
+function isKnownModelToken(token: string, models: ModelDefinition[]): boolean {
+  return findModelId(token, models) !== null;
+}
+
+function availableModelList(models: ModelDefinition[]): string {
+  return models.map((model) => model.id).join(', ');
+}
+
+function parseCritiqueArgs(
+  args: string[],
+  models: ModelDefinition[],
+  defaultCriticIds: ModelId[],
+): { mode: CritiqueMode; criticIds: ModelId[] } | { error: string } {
+  if (args.length === 0) {
+    return { mode: 'parallel', criticIds: [...defaultCriticIds] };
+  }
+
+  const [first, ...rest] = args;
+  if (first === 'parallel' || first === 'sequential') {
+    const mode = first;
+    if (rest.length === 0) {
+      return { mode, criticIds: [...defaultCriticIds] };
+    }
+
+    const criticIds: ModelId[] = [];
+    for (const token of rest) {
+      const modelId = findModelId(token, models);
+      if (!modelId) {
+        return {
+          error: `Unknown model: "${token}"\nAvailable models: ${availableModelList(models)}`,
+        };
+      }
+      criticIds.push(modelId);
+    }
+
+    return { mode, criticIds };
+  }
+
+  if (isKnownModelToken(first, models)) {
+    return {
+      error: `Specify mode before model ids:\n  /critique parallel ${args.join(' ')}\n  /critique sequential ${args.join(' ')}`,
+    };
+  }
+
+  return { error: `Unknown argument: "${first}"` };
+}
+
 function formatCritics(criticIds: ModelId[]): string {
   return `Critics: ${criticIds.map((id) => getModelDisplayName(id)).join(', ')}`;
 }
@@ -112,36 +159,12 @@ export function parseCommand(input: string, context: CommandContext): CommandRes
         };
       }
     case '/critique': {
-      let mode: CritiqueMode = 'parallel';
-      let criticTokens = rest;
-
-      if (rest[0] === 'parallel') {
-        mode = 'parallel';
-        criticTokens = rest.slice(1);
-      } else if (rest[0] === 'sequential') {
-        mode = 'sequential';
-        criticTokens = rest.slice(1);
+      const parsed = parseCritiqueArgs(rest, context.models, context.repl.criticIds);
+      if ('error' in parsed) {
+        return { type: 'info', message: parsed.error };
       }
 
-      if (mode === 'parallel' && criticTokens.length > 0) {
-        return { type: 'info', message: 'Usage: /critique [parallel|sequential] [id...]' };
-      }
-
-      if (criticTokens.length === 0) {
-        return {
-          type: 'critique',
-          mode,
-          criticIds: [...context.repl.criticIds],
-        };
-      }
-
-      const criticIds = parseModelIds(criticTokens, context.models);
-      if (!criticIds) {
-        const unknown = criticTokens.find((token) => !findModelId(token, context.models)) ?? criticTokens[0];
-        return { type: 'info', message: `Unknown model "${unknown}".` };
-      }
-
-      return { type: 'critique', mode, criticIds };
+      return { type: 'critique', mode: parsed.mode, criticIds: parsed.criticIds };
     }
     case '/review': {
       if (rest.length === 0) {
@@ -178,11 +201,6 @@ export function parseCommand(input: string, context: CommandContext): CommandRes
       };
     case '/help':
       {
-        const shortcutLines = context.models.map((entry) => {
-          const commandLabel = `  /${entry.id}`;
-          return `${commandLabel.padEnd(33, ' ')}Shortcut: /single ${entry.id}`;
-        });
-
       return {
         type: 'info',
         message: [
@@ -200,7 +218,7 @@ export function parseCommand(input: string, context: CommandContext): CommandRes
           'Modes',
           '  /both                            Multi mode',
           '  /single <id>                     Single model freeform',
-          ...shortcutLines,
+          '  /<id>                            Shortcut for any model in config.json',
           '',
           'Direct address',
           '  @<model> <message>               One-turn message, mode unchanged',
